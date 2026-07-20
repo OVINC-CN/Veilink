@@ -1,15 +1,34 @@
-# Veilink
+<h1 align="center">
+  <img src="assets/veilink-logo.png" alt="Veilink" width="256">
+</h1>
 
-[![CI](https://github.com/OVINC-CN/Veilink/actions/workflows/ci.yml/badge.svg)](https://github.com/OVINC-CN/Veilink/actions/workflows/ci.yml)
-[![Container images](https://github.com/OVINC-CN/Veilink/actions/workflows/images.yml/badge.svg)](https://github.com/OVINC-CN/Veilink/actions/workflows/images.yml)
+<p align="center">
+  <strong>隐私优先、阅后即清的浏览器聊天工具，消息与文件均采用端到端加密。</strong>
+</p>
 
-隐私优先、阅后即清的浏览器聊天工具。消息和文件采用端到端加密，应用服务器不接收聊天明文；系统不使用数据库，聊天室仅在至少一个已认证的浏览器 Tab 保持连接时存在。
+<p align="center">
+  <a href="https://github.com/OVINC-CN/Veilink/actions/workflows/ci.yml"><img src="https://github.com/OVINC-CN/Veilink/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/OVINC-CN/Veilink/actions/workflows/images.yml"><img src="https://github.com/OVINC-CN/Veilink/actions/workflows/images.yml/badge.svg" alt="容器镜像"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/OVINC-CN/Veilink" alt="MIT 许可证"></a>
+</p>
 
-[English](README.md)
+<p align="center">
+  <a href="#功能特性">功能特性</a> ·
+  <a href="#项目架构">项目架构</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#容器部署">容器部署</a> ·
+  <a href="#安全与隐私">安全与隐私</a>
+</p>
+
+<p align="center">
+  <a href="README.md">English</a> | <strong>简体中文</strong>
+</p>
+
+Veilink 不使用数据库，也不会将聊天内容上传到应用服务器。房间和信令状态仅短暂保存在进程内存中；空房只会保留到有效期结束。
 
 > **安全状态：** 项目目前仍是早期实现。用于敏感场景前，请自行审查威胁模型与部署配置。
 
-## 功能概览
+## 功能特性
 
 - 通过邀请链接及单独分享的 6 位 PIN 加入聊天室。
 - 浏览器本地使用链接密钥和 PIN 派生 E2EE 密钥；读取 URL Fragment 后立即从地址栏移除。
@@ -18,7 +37,7 @@
 - 房间和信令状态仅保存在进程内存中。空房会保留至有效期结束；房主手动销毁或应用重启也会销毁聊天室。
 - 支持受限富文本、本地生成的隐私链接卡片，以及受支持附件的内存预览。
 
-## 架构
+## 项目架构
 
 项目采用 pnpm workspace：React/Vite 浏览器客户端、Fastify 信令服务器以及共享协议包。生产容器从同一个 Origin 提供前端和 API。应用与 coturn 共享部署密钥，并为客户端签发短期 REST/HMAC TURN 凭据。
 
@@ -31,7 +50,7 @@
 - TURN 主机具备公网 IPv4，并开放 UDP/TCP 3478 及 UDP 49160–49200
 - 公网聊天域名与有效 TLS 证书
 
-## 本地验证
+## 快速开始
 
 ```bash
 pnpm install --frozen-lockfile
@@ -130,7 +149,7 @@ docker compose -f docker-compose.yml \
 
 6 位房间 PIN 不是服务器环境密钥，也不能通过环境变量配置。它由每个房间随机生成，仅在浏览器中与链接 Fragment 混合派生密钥。
 
-## 隐私边界
+## 安全与隐私
 
 Veilink 不进行应用级持久化，但普通浏览器和操作系统无法绝对保证内存、Blob 实现、交换区、崩溃转储、历史同步、截图、扩展或下载文件从未写入存储介质。因此，“不留痕”是应用可控范围内的尽力保证，并非操作系统级承诺。
 

@@ -1,19 +1,37 @@
-# Veilink
+<h1 align="center">
+  <img src="assets/veilink-logo.png" alt="Veilink" width="256">
+</h1>
 
-[![CI](https://github.com/OVINC-CN/Veilink/actions/workflows/ci.yml/badge.svg)](https://github.com/OVINC-CN/Veilink/actions/workflows/ci.yml)
-[![Container images](https://github.com/OVINC-CN/Veilink/actions/workflows/images.yml/badge.svg)](https://github.com/OVINC-CN/Veilink/actions/workflows/images.yml)
+<p align="center">
+  <strong>Privacy-first, ephemeral browser chat with end-to-end encrypted messages and files.</strong>
+</p>
 
-Privacy-first, ephemeral browser chat with end-to-end encrypted messages and
-files. Veilink has no database and does not upload chat content to the
-application server. A room exists only while at least one authenticated browser
-tab remains connected.
+<p align="center">
+  <a href="https://github.com/OVINC-CN/Veilink/actions/workflows/ci.yml"><img src="https://github.com/OVINC-CN/Veilink/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/OVINC-CN/Veilink/actions/workflows/images.yml"><img src="https://github.com/OVINC-CN/Veilink/actions/workflows/images.yml/badge.svg" alt="Container images"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/OVINC-CN/Veilink" alt="MIT License"></a>
+</p>
 
-[简体中文](README_CN.md)
+<p align="center">
+  <a href="#features">Features</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#container-deployment">Deployment</a> ·
+  <a href="#security-and-privacy">Security</a>
+</p>
+
+<p align="center">
+  <strong>English</strong> | <a href="README_CN.md">简体中文</a>
+</p>
+
+Veilink has no database and does not upload chat content to the application
+server. Rooms and signalling state are ephemeral and stored only in process
+memory; vacant rooms remain available only until their expiry time.
 
 > **Security status:** this project is an early implementation. Review the
 > threat model and deployment settings before using it for sensitive work.
 
-## What it does
+## Features
 
 - Joins rooms through a link plus a separately shared six-digit PIN.
 - Derives E2EE keys locally from the link secret and PIN; the URL fragment is
@@ -48,7 +66,7 @@ cannot share room state. Restarting the app invalidates every active room.
   49160–49200 forwarded to the TURN host
 - DNS names and a valid TLS certificate for the public chat origin
 
-## Local verification
+## Quick start
 
 ```bash
 pnpm install --frozen-lockfile
@@ -191,7 +209,7 @@ The six-digit room PIN is not an environment secret and is never configured on
 the server. It is generated per room and mixed with the link fragment entirely
 in the browser.
 
-## Privacy boundaries
+## Security and privacy
 
 Veilink avoids application-level persistence, but a normal browser and operating
 system cannot guarantee that RAM, Blob implementations, swap, crash dumps,
