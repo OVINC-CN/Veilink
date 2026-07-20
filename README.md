@@ -1,6 +1,7 @@
 # Veilink
 
 [![CI](https://github.com/OVINC-CN/Veilink/actions/workflows/ci.yml/badge.svg)](https://github.com/OVINC-CN/Veilink/actions/workflows/ci.yml)
+[![Container images](https://github.com/OVINC-CN/Veilink/actions/workflows/images.yml/badge.svg)](https://github.com/OVINC-CN/Veilink/actions/workflows/images.yml)
 
 Privacy-first, ephemeral browser chat with end-to-end encrypted messages and
 files. Veilink has no database and does not upload chat content to the
@@ -104,9 +105,10 @@ Compose builds a thin coturn image from the pinned `coturn/coturn:4.14.0-r0`
 base. It copies the upstream binary without its file-capability xattr so the
 container can retain `no-new-privileges` and `cap_drop: ALL`; otherwise Linux
 rejects startup with exit code 126. No runtime capability is added.
-The default local tags are `veilink:local` and `veilink-turn:local`; set
-`VEILINK_IMAGE` and `VEILINK_TURN_IMAGE` to immutable registry tags when using
-prebuilt images.
+Main-branch builds publish multi-platform images as
+`ghcr.io/ovinc-cn/veilink` and `ghcr.io/ovinc-cn/veilink-turn`, with `latest`
+and immutable `sha-*` tags plus SBOM/provenance attestations. Production should
+set `VEILINK_IMAGE` and `VEILINK_TURN_IMAGE` to immutable `sha-*` tags.
 
 ### Reverse proxy and trusted IPs
 
@@ -168,7 +170,7 @@ do not make it world-readable.
 | Variable | Purpose | Default / constraint |
 | --- | --- | --- |
 | `APP_ORIGIN` | Exact public browser origin | Required HTTPS URL |
-| `VEILINK_IMAGE`, `VEILINK_TURN_IMAGE` | App and hardened coturn image tags | Local build tags |
+| `VEILINK_IMAGE`, `VEILINK_TURN_IMAGE` | App and hardened coturn image tags | GHCR `latest`; pin `sha-*` in production |
 | `TLS_CERT_FILE`, `TLS_KEY_FILE` | Optional native app HTTPS PEM paths | Set both or neither |
 | `TRUST_PROXY_CIDRS` | Direct reverse-proxy CIDR(s) | Required, explicit |
 | `ROOM_TTL_SECONDS` | In-memory room lifetime | `86400`, cannot exceed it |

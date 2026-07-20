@@ -2,7 +2,7 @@ name: veilink
 
 services:
   app:
-    image: ${VEILINK_IMAGE:-veilink:local}
+    image: ${VEILINK_IMAGE:-ghcr.io/ovinc-cn/veilink:latest}
     build:
       context: .
       dockerfile: Dockerfile
@@ -70,7 +70,7 @@ services:
       replicas: 1
 
   turn:
-    image: ${VEILINK_TURN_IMAGE:-veilink-turn:local}
+    image: ${VEILINK_TURN_IMAGE:-ghcr.io/ovinc-cn/veilink-turn:latest}
     build:
       context: .
       dockerfile: deploy/coturn/Dockerfile
