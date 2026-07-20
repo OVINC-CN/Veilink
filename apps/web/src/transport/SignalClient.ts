@@ -358,7 +358,7 @@ export class SignalClient {
       roomId: this.roomId,
       payload: {
         code: 'resume_rejected',
-        message: 'The in-memory room session could not be resumed.',
+        message: 'The secure connection could not be restored.',
       },
     }
     for (const listener of this.listeners) listener(frame)

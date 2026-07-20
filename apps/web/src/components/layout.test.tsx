@@ -26,7 +26,8 @@ describe('minimal entry experience', () => {
     )
 
     expect(screen.getByRole('main')).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: '创建安全聊天室' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading')).not.toBeInTheDocument()
+    expect(screen.getByText('随机头像')).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: '昵称' })).toHaveAttribute('autocomplete', 'off')
     expect(screen.getByRole('button', { name: '切换语言' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '切换主题' })).toBeInTheDocument()
@@ -34,7 +35,7 @@ describe('minimal entry experience', () => {
     expect(container.querySelector('aside')).toBeNull()
 
     fireEvent.change(screen.getByRole('textbox', { name: '昵称' }), { target: { value: 'Mira' } })
-    fireEvent.click(screen.getByRole('button', { name: /创建聊天室/u }))
+    fireEvent.click(screen.getByRole('button', { name: '创建' }))
     expect(onCreate).toHaveBeenCalledWith('Mira')
     expect(screen.queryByText('P2P 直连')).not.toBeInTheDocument()
   })
@@ -89,7 +90,7 @@ describe('selected single-column room layout', () => {
     )
 
     expect(screen.getByRole('main')).toHaveClass('chat-main')
-    expect(screen.getByRole('navigation', { name: '房间控制' })).toBeInTheDocument()
+    expect(screen.getByRole('navigation', { name: '操作' })).toBeInTheDocument()
     expect(container.querySelector('aside')).toBeNull()
     expect(screen.getByText('TURN 中继')).toBeInTheDocument()
 

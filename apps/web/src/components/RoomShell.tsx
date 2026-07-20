@@ -85,7 +85,7 @@ export function RoomShell(props: RoomShellProps) {
           {messages.length === 0 ? (
             <div className="empty-state">
               <span className="empty-state-icon"><ShieldCheck weight="duotone" /></span>
-              <strong>{preferences.locale === 'zh-CN' ? '这是一段全新的私密会话' : 'A fresh private conversation'}</strong>
+              <strong>{preferences.locale === 'zh-CN' ? '从第一条消息开始' : 'Start with the first message'}</strong>
               <span>{t(preferences.locale, 'noMessages')}</span>
             </div>
           ) : null}

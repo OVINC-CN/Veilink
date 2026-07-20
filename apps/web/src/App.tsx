@@ -426,7 +426,7 @@ export default function App() {
         completeInitialConnectionIfReady(runtime)
         return
       }
-      setError('连接超时，已自动退出聊天室，请重试。')
+      setError('连接超时，已自动退出，请重试。')
       stopRuntime(true)
       window.history.replaceState(null, '', '/')
       initialRoomId.current = undefined
@@ -546,7 +546,7 @@ export default function App() {
           await runtime.mesh.refreshTurnCredentials(turnIce(refreshed))
           scheduleTurnRefresh(runtime, refreshed)
         } catch {
-          setError('TURN 临时凭据刷新失败，请重新进入房间。')
+          setError('TURN 临时凭据刷新失败，请重新加入。')
         }
       })()
     }, delay)
@@ -881,7 +881,7 @@ export default function App() {
     }
     if (frame.type === 'room.ended') {
       stopRuntime(false)
-      setError(`聊天室已结束：${frame.payload.reason}`)
+      setError(`连接已结束：${frame.payload.reason}`)
       window.history.replaceState(null, '', '/')
       setStage('create')
       return
@@ -942,7 +942,7 @@ export default function App() {
       signal?.close()
       if (identity) destroyIdentity(identity)
       if (keys) wipeKeys(keys)
-      setError(caught instanceof Error ? caught.message : '创建聊天室失败')
+      setError(caught instanceof Error ? caught.message : '创建失败')
     } finally {
       setBusy(false)
     }
@@ -973,7 +973,7 @@ export default function App() {
         disposePendingJoin(pending)
         pendingJoinRef.current = undefined
       }
-      setError(caught instanceof Error ? caught.message : '加入聊天室失败')
+      setError(caught instanceof Error ? caught.message : '加入失败')
       setStage('join')
     } finally {
       setBusy(false)
@@ -1007,7 +1007,7 @@ export default function App() {
       signal?.close()
       if (identity) destroyIdentity(identity)
       if (keys) wipeKeys(keys)
-      setError(caught instanceof Error ? caught.message : '加入聊天室失败')
+      setError(caught instanceof Error ? caught.message : '加入失败')
     } finally {
       setBusy(false)
     }

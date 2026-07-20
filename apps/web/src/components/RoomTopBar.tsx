@@ -137,13 +137,13 @@ export function RoomTopBar({ room, preferences, onPreferences, onLeave, onDestro
     <header className="topbar" ref={root}>
       <div className="topbar-inner">
         <Brand />
-        <div className="room-summary" aria-label={zh ? '房间状态' : 'Room status'}>
+        <div className="room-summary" aria-label={zh ? '连接状态' : 'Connection status'}>
           <span className="secure-dot" />
           <strong>{t(preferences.locale, 'turn')}</strong>
           <span className="summary-divider" aria-hidden="true" />
           <time aria-label={`${t(preferences.locale, 'expires')} ${remaining}`}>{remaining}</time>
         </div>
-        <nav className="top-actions" aria-label={zh ? '房间控制' : 'Room controls'}>
+        <nav className="top-actions" aria-label={zh ? '操作' : 'Controls'}>
         <div className="popover-anchor">
           <button className="top-action" type="button" aria-expanded={panel === 'members'} onClick={() => toggle('members')}>
             <Users /><span>{t(preferences.locale, 'members')} {room.members.length}</span><CaretDown />
@@ -174,7 +174,7 @@ export function RoomTopBar({ room, preferences, onPreferences, onLeave, onDestro
               <p>{zh ? '共享密钥指纹' : 'Shared key fingerprint'}</p>
               <code className="fingerprint">{room.fingerprint}</code>
               <p className="popover-note">{zh ? '请通过其他渠道核对指纹。Veilink 不宣称双棘轮或完全前向保密。' : 'Verify this fingerprint through another channel. Veilink does not claim double-ratchet encryption or full forward secrecy.'}</p>
-              <dl className="security-facts"><div><dt>{t(preferences.locale, 'expires')}</dt><dd>{remaining}</dd></div><div><dt>{zh ? '会话' : 'Session'}</dt><dd>{zh ? '仅内存' : 'Memory only'}</dd></div></dl>
+              <dl className="security-facts"><div><dt>{t(preferences.locale, 'expires')}</dt><dd>{remaining}</dd></div><div><dt>{zh ? '存储' : 'Storage'}</dt><dd>{zh ? '仅内存' : 'Memory only'}</dd></div></dl>
             </section>
           ) : null}
         </div>
@@ -214,8 +214,8 @@ export function RoomTopBar({ room, preferences, onPreferences, onLeave, onDestro
         <section ref={destroyDialog} className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="destroy-dialog-title">
           <button className="dialog-close" type="button" aria-label={zh ? '关闭' : 'Close'} onClick={closeDestroy}><X /></button>
           <span className="dialog-symbol"><WarningOctagon weight="duotone" /></span>
-          <h2 id="destroy-dialog-title">{zh ? '销毁这个聊天室？' : 'Destroy this room?'}</h2>
-          <p>{zh ? '所有成员将立即断开，房间无法恢复。请输入密钥指纹末 4 位以确认。' : 'Everyone will be disconnected immediately and the room cannot be recovered. Enter the final 4 characters of the key fingerprint to confirm.'}</p>
+          <h2 id="destroy-dialog-title">{zh ? '确认销毁？' : 'Confirm destruction?'}</h2>
+          <p>{zh ? '所有成员将立即断开，且无法恢复。请输入密钥指纹末 4 位以确认。' : 'Everyone will be disconnected immediately and access cannot be restored. Enter the final 4 characters of the key fingerprint to confirm.'}</p>
           <label className="confirmation-field">
             <span>{zh ? `输入 ${fingerprintSuffix}` : `Enter ${fingerprintSuffix}`}</span>
             <input autoFocus autoComplete="off" spellCheck="false" maxLength={4} value={destroyConfirmation} onChange={(event) => setDestroyConfirmation(event.target.value.toUpperCase())} onKeyDown={(event) => { if (event.key === 'Enter') confirmDestroy() }} />

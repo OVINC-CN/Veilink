@@ -351,7 +351,6 @@ button:disabled { cursor: default; }
 .primary-button { display: inline-flex; min-height: 48px; align-items: center; justify-content: center; gap: 8px; padding: 0 18px; border: 0; border-radius: 12px; background: var(--accent); box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 22%, transparent), inset 0 1px rgb(255 255 255 / 22%); color: white; font-weight: 680; cursor: pointer; transition: transform 100ms ease-out, background-color var(--ease-out), box-shadow var(--ease-out), opacity var(--ease-out); }
 .primary-button:hover:not(:disabled) { background: var(--accent-hover); box-shadow: 0 10px 28px color-mix(in srgb, var(--accent) 27%, transparent); }
 .primary-button:disabled { box-shadow: none; opacity: .4; cursor: wait; }
-.form-footnote { margin: -5px 4px 0; color: var(--text-tertiary); font-size: 10px; line-height: 1.5; text-align: center; }
 .entry-footer { position: relative; z-index: 2; display: flex; justify-content: center; align-items: center; gap: 6px; color: var(--text-tertiary); font-size: 10px; text-align: center; }
 .entry-footer svg { width: 13px; height: 13px; color: var(--green); }
 .form-error { padding: 11px 12px; border: 1px solid color-mix(in srgb, var(--red) 22%, transparent); border-radius: 10px; background: var(--red-soft); color: var(--red); font-size: 12px; }
