@@ -6,6 +6,8 @@ import {
   MAX_FILE_SIZE_BYTES,
   MAX_ICE_CANDIDATE_LENGTH,
   MAX_LINK_LENGTH,
+  MAX_REPLY_EXCERPT_BYTES,
+  MAX_REPLY_EXCERPT_CODE_POINTS,
   MAX_RICH_TEXT_ATTACHMENTS,
   MAX_RICH_TEXT_BYTES,
   MAX_RICH_TEXT_DEPTH,
@@ -15,7 +17,7 @@ import {
   PROTOCOL_VERSION,
 } from "./constants.js";
 import { base64UrlDecode } from "./encoding.js";
-import { FileNameSchema } from "./nickname.js";
+import { FileNameSchema, NicknameSchema } from "./nickname.js";
 import {
   AttachmentIdSchema,
   DigestSchema,
@@ -345,6 +347,38 @@ export const RichTextDocumentSchema = z.unknown().transform((input, context): Ri
 export const AttachmentPreviewKindSchema = z.enum(["image", "audio", "video", "pdf", "download"]);
 export type AttachmentPreviewKind = z.infer<typeof AttachmentPreviewKindSchema>;
 
+export const ReplyPreviewKindSchema = z.enum(["text", "image", "audio", "video", "pdf", "file"]);
+export type ReplyPreviewKind = z.infer<typeof ReplyPreviewKindSchema>;
+
+const REPLY_FORBIDDEN_FORMATTING = /[\p{Cc}\p{Cs}\p{Zl}\p{Zp}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
+const ReplyExcerptSchema = z
+  .string()
+  .min(1)
+  .refine((value) => value === value.normalize("NFC") && value === value.trim() && value === value.replace(/\p{Zs}+/gu, " "), {
+    message: "Reply excerpt must be normalized plain text",
+  })
+  .refine((value) => !REPLY_FORBIDDEN_FORMATTING.test(value), {
+    message: "Reply excerpt must not contain control or bidirectional formatting characters",
+  })
+  .refine((value) => [...value].length <= MAX_REPLY_EXCERPT_CODE_POINTS, {
+    message: `Reply excerpt exceeds ${MAX_REPLY_EXCERPT_CODE_POINTS} code points`,
+  })
+  .refine((value) => encoder.encode(value).byteLength <= MAX_REPLY_EXCERPT_BYTES, {
+    message: `Reply excerpt exceeds ${MAX_REPLY_EXCERPT_BYTES} UTF-8 bytes`,
+  });
+
+export const ReplyReferenceSchema = z
+  .object({
+    messageId: MessageIdSchema,
+    senderId: MemberIdSchema,
+    senderName: NicknameSchema,
+    sentAt: EpochMillisecondsSchema,
+    kind: ReplyPreviewKindSchema,
+    excerpt: ReplyExcerptSchema,
+  })
+  .strict();
+export type ReplyReference = z.infer<typeof ReplyReferenceSchema>;
+
 export const AttachmentMetadataSchema = z
   .object({
     attachmentId: AttachmentIdSchema,
@@ -369,12 +403,20 @@ export const AttachmentMetadataSchema = z
 export type AttachmentMetadata = z.infer<typeof AttachmentMetadataSchema>;
 
 export const RichTextMessageSchema = z
-  .object({ type: z.literal("rich-text"), document: RichTextDocumentSchema })
+  .object({
+    type: z.literal("rich-text"),
+    document: RichTextDocumentSchema,
+    replyTo: ReplyReferenceSchema.optional(),
+  })
   .strict();
 export type RichTextMessage = z.infer<typeof RichTextMessageSchema>;
 
 export const AttachmentOfferSchema = z
-  .object({ type: z.literal("attachment-offer"), attachment: AttachmentMetadataSchema })
+  .object({
+    type: z.literal("attachment-offer"),
+    attachment: AttachmentMetadataSchema,
+    replyTo: ReplyReferenceSchema.optional(),
+  })
   .strict();
 export type AttachmentOffer = z.infer<typeof AttachmentOfferSchema>;
 

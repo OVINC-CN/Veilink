@@ -1,8 +1,9 @@
-import { isSafeHttpUrl } from '@veilink/protocol'
+import { isSafeHttpUrl, type ReplyReference } from '@veilink/protocol'
 import { EditorContent, useEditor } from '@tiptap/react'
 import Link from '@tiptap/extension-link'
 import StarterKit from '@tiptap/starter-kit'
 import {
+  ArrowBendUpLeft,
   Code,
   LinkSimple,
   ListBullets,
@@ -24,14 +25,19 @@ import {
 } from 'react'
 import type { RichTextDocument } from '../models'
 import type { Preferences } from '../preferences'
+import { t } from '../i18n'
+import { formatReplyExcerpt } from './replyUtils'
 
 interface ChatComposerProps {
   connectionState: 'connecting' | 'ready'
   preferences: Preferences
   placeholder: string
   sendLabel: string
-  onSend: (document: RichTextDocument) => Promise<void> | void
-  onFiles: (files: File[]) => Promise<void> | void
+  replyTo?: ReplyReference
+  onCancelReply: () => void
+  onReplyConsumed: (replyTo: ReplyReference) => void
+  onSend: (document: RichTextDocument, replyTo?: ReplyReference) => Promise<void> | void
+  onFiles: (files: File[], replyTo?: ReplyReference) => Promise<boolean> | boolean
 }
 
 interface ToolbarButtonProps {
@@ -79,7 +85,7 @@ function ToolbarButton({ label, active, disabled, expanded, children, onActivate
   )
 }
 
-export function ChatComposer({ connectionState, preferences, placeholder, sendLabel, onSend, onFiles }: ChatComposerProps) {
+export function ChatComposer({ connectionState, preferences, placeholder, sendLabel, replyTo, onCancelReply, onReplyConsumed, onSend, onFiles }: ChatComposerProps) {
   const disabled = connectionState !== 'ready'
   const root = useRef<HTMLDivElement>(null)
   const toolbar = useRef<HTMLDivElement>(null)
@@ -126,7 +132,7 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
         const files = filesFromClipboard(event.clipboardData)
         if (files.length === 0) return false
         event.preventDefault()
-        void onFiles(files)
+        void submitFiles(files)
         return true
       },
     },
@@ -149,8 +155,10 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
     }
     const escape = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
+      const popoverWasOpen = emojiOpen || linkOpen
       setEmojiOpen(false)
       setLinkOpen(false)
+      if (!popoverWasOpen && replyTo) onCancelReply()
       editor?.commands.focus()
     }
     document.addEventListener('pointerdown', close)
@@ -159,7 +167,11 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
       document.removeEventListener('pointerdown', close)
       document.removeEventListener('keydown', escape)
     }
-  }, [editor])
+  }, [editor, emojiOpen, linkOpen, onCancelReply, replyTo])
+
+  useEffect(() => {
+    if (replyTo) editor?.commands.focus('end')
+  }, [editor, replyTo])
 
   useLayoutEffect(() => {
     if (!emojiOpen) {
@@ -205,13 +217,23 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
     if (!editor || editor.isEmpty || disabled) return
     const document = editor.getJSON() as RichTextDocument
     try {
-      await onSend(document)
+      await onSend(document, replyTo)
       editor.commands.clearContent(true)
       editor.commands.focus()
       setEmojiOpen(false)
       setLinkOpen(false)
+      if (replyTo) onReplyConsumed(replyTo)
     } catch {
       // The parent keeps the draft in place and presents the transport error.
+    }
+  }
+
+  const submitFiles = async (files: File[]): Promise<void> => {
+    try {
+      const sent = await onFiles(files, replyTo)
+      if (sent && replyTo) onReplyConsumed(replyTo)
+    } catch {
+      // The parent presents the transfer error and keeps the reply context available.
     }
   }
 
@@ -278,6 +300,18 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
 
   return (
     <div className={`composer-shell${disabled ? ' is-disabled' : ''}`} ref={root} aria-busy={disabled}>
+      {replyTo ? (
+        <div className="composer-reply" role="status">
+          <ArrowBendUpLeft weight="bold" aria-hidden="true" />
+          <span className="composer-reply-copy">
+            <strong>{t(preferences.locale, 'replyingTo')} <b>{replyTo.senderName}</b></strong>
+            <span>{formatReplyExcerpt(replyTo, preferences.locale)}</span>
+          </span>
+          <button type="button" aria-label={t(preferences.locale, 'cancelReply')} title={t(preferences.locale, 'cancelReply')} onClick={() => { onCancelReply(); editor?.commands.focus() }}>
+            <X />
+          </button>
+        </div>
+      ) : null}
       <div ref={toolbar} className="composer-toolbar" aria-label={preferences.locale === 'zh-CN' ? '文本格式' : 'Text formatting'}>
         <div className="toolbar-group">
           <ToolbarButton label={preferences.locale === 'zh-CN' ? '粗体' : 'Bold'} disabled={commandDisabled(Boolean(editor?.can().chain().focus().toggleBold().run()))} active={Boolean(editor?.isActive('bold'))} onActivate={() => editor?.chain().focus().toggleBold().run()}><TextB /></ToolbarButton>
@@ -307,7 +341,7 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
             onChange={(event) => {
               const files = [...(event.target.files ?? [])]
               event.target.value = ''
-              if (files.length > 0) void onFiles(files)
+              if (files.length > 0) void submitFiles(files)
             }}
           />
         </div>

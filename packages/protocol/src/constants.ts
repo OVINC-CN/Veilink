@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 2 as const;
+export const PROTOCOL_VERSION = 3 as const;
 
 export const ROOM_ID_BYTES = 16;
 export const LINK_SECRET_BYTES = 32;
@@ -36,6 +36,8 @@ export const MAX_RICH_TEXT_NODES = 256;
 export const MAX_RICH_TEXT_DEPTH = 8;
 export const MAX_RICH_TEXT_LINKS = 10;
 export const MAX_RICH_TEXT_ATTACHMENTS = 4;
+export const MAX_REPLY_EXCERPT_CODE_POINTS = 160;
+export const MAX_REPLY_EXCERPT_BYTES = 512;
 export const MAX_LINK_LENGTH = 2_048;
 export const MAX_SIGNAL_SDP_LENGTH = 128 * 1024;
 export const MAX_ICE_CANDIDATE_LENGTH = 4_096;

@@ -18,6 +18,7 @@ import {
   type ChatPayload,
   type EncryptedFileChunk,
   type PublicMember,
+  type ReplyReference,
   type RoomSnapshot,
   type ServerSignalEnvelope,
   type TurnCredentials,
@@ -654,12 +655,14 @@ export default function App() {
     if (payload.type === 'rich-text') {
       updateMessages((current) => [...current, {
         id: `${sender.id}:${messageId}`,
+        messageId,
         senderId: sender.id,
         senderName: sender.nickname,
         senderIdentityPublicKey: sender.identityPublicKey,
         sentAt,
         document: payload.document as RichTextDocument,
         attachments: [],
+        replyTo: payload.replyTo,
       }])
       return
     }
@@ -707,6 +710,7 @@ export default function App() {
       }
       updateMessages((current) => [...current, {
         id: `${sender.id}:${messageId}`,
+        messageId,
         senderId: sender.id,
         senderName: sender.nickname,
         senderIdentityPublicKey: sender.identityPublicKey,
@@ -721,6 +725,7 @@ export default function App() {
           progress: 0,
           previewable: false,
         }],
+        replyTo: payload.replyTo,
       }])
       return
     }
@@ -1023,24 +1028,26 @@ export default function App() {
     return frame.messageId
   }
 
-  const sendDocument = async (document: RichTextDocument): Promise<void> => {
+  const sendDocument = async (document: RichTextDocument, replyTo?: ReplyReference): Promise<void> => {
     const current = roomRef.current
     if (!current) return
     try {
       setError(undefined)
-      const payload = ChatPayloadSchema.parse({ type: 'rich-text', document })
+      const payload = ChatPayloadSchema.parse({ type: 'rich-text', document, replyTo })
       if (payload.type !== 'rich-text') throw new Error('Invalid rich-text payload')
       const messageId = await sendPayload(payload)
       const self = current.members.find((member) => member.id === current.memberId)
       if (!self) return
       updateMessages((items) => [...items, {
         id: `${self.id}:${messageId}`,
+        messageId,
         senderId: self.id,
         senderName: self.nickname,
         senderIdentityPublicKey: self.identityPublicKey,
         sentAt: Date.now(),
         document: payload.document as RichTextDocument,
         attachments: [],
+        replyTo: payload.replyTo,
       }])
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '消息发送失败')
@@ -1048,13 +1055,14 @@ export default function App() {
     }
   }
 
-  const sendFiles = async (files: File[]): Promise<void> => {
+  const sendFiles = async (files: File[], replyTo?: ReplyReference): Promise<boolean> => {
     const runtime = runtimeRef.current
     const current = roomRef.current
     const self = current?.members.find((member) => member.id === current.memberId)
-    if (!runtime || !current || !self) return
+    if (!runtime || !current || !self) return false
     const accepted = files.slice(0, 4)
     const transferEpoch = runtime.transferEpoch
+    let sentAny = false
     for (const file of accepted) {
       if (runtimeRef.current !== runtime || runtime.transferEpoch !== transferEpoch) break
       const maxBytes = preferences.maxFileSizeMb * 1024 * 1024
@@ -1099,16 +1107,21 @@ export default function App() {
               secretstreamHeader: start.header,
             })
             if (controller.signal.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
-            const messageId = await sendPayload({ type: 'attachment-offer', attachment: metadata })
+            const payload = ChatPayloadSchema.parse({ type: 'attachment-offer', attachment: metadata, replyTo })
+            if (payload.type !== 'attachment-offer') throw new Error('Invalid attachment payload')
+            const messageId = await sendPayload(payload)
             if (controller.signal.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
+            sentAny = true
             updateMessages((items) => [...items, {
               id: `${self.id}:${messageId}`,
+              messageId,
               senderId: self.id,
               senderName: self.nickname,
               senderIdentityPublicKey: self.identityPublicKey,
               sentAt: Date.now(),
               document: attachmentDocument(fileName),
               attachments: [{ id: viewId, name: fileName, mime: metadata!.mimeType, size: file.size, status: 'sending', progress: 0, previewable: validatedMedia.previewable, objectUrl }],
+              replyTo: payload.replyTo,
             }])
           },
           async (chunk: LocalEncryptedFileChunk) => {
@@ -1139,6 +1152,7 @@ export default function App() {
         }
       }
     }
+    return sentAny
   }
 
   const leaveRoom = (): void => {

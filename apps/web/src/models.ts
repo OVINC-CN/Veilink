@@ -1,3 +1,4 @@
+import type { ReplyReference } from '@veilink/protocol'
 import type { DerivedKeys } from './crypto/types'
 
 export interface Member {
@@ -39,12 +40,14 @@ export interface AttachmentView {
 
 export interface ChatMessage {
   id: string
+  messageId: string
   senderId: string
   senderName: string
   senderIdentityPublicKey: string
   sentAt: number
   document: RichTextDocument
   attachments: AttachmentView[]
+  replyTo?: ReplyReference
 }
 
 export interface ActiveRoom {
