@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "pnpm --stream -r build",
-    "typecheck": "pnpm --stream -r typecheck",
+    "typecheck": "pnpm --parallel --stream -r typecheck",
     "test": "pnpm --stream -r test",
     "lint": "eslint apps packages --max-warnings 0",
     "audit": "pnpm audit --prod"
