@@ -21,7 +21,7 @@ describe('minimal entry experience', () => {
     const onCreate = vi.fn()
     const { container } = render(
       <EntryShell preferences={preferences} onPreferences={vi.fn()}>
-        <CreateRoomView preferences={preferences} busy={false} onCreate={onCreate} />
+        <CreateRoomView preferences={preferences} busy={false} avatarSeed="avatar-seed" avatarBusy={false} onRegenerateAvatar={vi.fn()} onCreate={onCreate} />
       </EntryShell>,
     )
 
@@ -79,7 +79,7 @@ describe('selected single-column room layout', () => {
         room={room}
         messages={[]}
         preferences={preferences}
-        connected
+        connectionState="ready"
         onPreferences={vi.fn()}
         onSend={vi.fn()}
         onFiles={vi.fn()}
@@ -99,6 +99,6 @@ describe('selected single-column room layout', () => {
     expect(membersButton).toHaveAttribute('aria-expanded', 'true')
 
     const membersPanel = screen.getByRole('region', { name: '成员' })
-    expect(within(membersPanel).getByText(/所有 WebRTC 连接均强制通过 TURN 中继/u)).toBeInTheDocument()
+    expect(within(membersPanel).queryByText(/公网 IP/u)).not.toBeInTheDocument()
   })
 })

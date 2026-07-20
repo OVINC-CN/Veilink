@@ -41,6 +41,7 @@ export interface ChatMessage {
   id: string
   senderId: string
   senderName: string
+  senderIdentityPublicKey: string
   sentAt: number
   document: RichTextDocument
   attachments: AttachmentView[]

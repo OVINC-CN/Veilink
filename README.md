@@ -107,7 +107,8 @@ container can retain `no-new-privileges` and `cap_drop: ALL`; otherwise Linux
 rejects startup with exit code 126. No runtime capability is added.
 Main-branch builds publish multi-platform images as
 `ghcr.io/ovinc-cn/veilink` and `ghcr.io/ovinc-cn/veilink-turn`, with `latest`
-and immutable `sha-*` tags plus SBOM/provenance attestations. Production should
+and immutable `sha-*` tags plus SBOM/provenance attestations. A Git tag push
+also publishes both images with the Git tag as the image tag. Production should
 set `VEILINK_IMAGE` and `VEILINK_TURN_IMAGE` to immutable `sha-*` tags.
 
 ### Reverse proxy and trusted IPs

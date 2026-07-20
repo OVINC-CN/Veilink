@@ -13,6 +13,7 @@ import { t } from '../i18n'
 import type { ActiveRoom } from '../models'
 import type { Preferences } from '../preferences'
 import { Brand } from './Brand'
+import { MemberAvatar } from './MemberAvatar'
 
 type Panel = 'members' | 'security' | 'settings' | 'more' | null
 
@@ -70,13 +71,14 @@ export function RoomTopBar({ room, preferences, onPreferences, onLeave, onDestro
 
   return (
     <header className="topbar" ref={root}>
-      <Brand tagline={t(preferences.locale, 'tagline')} />
-      <div className="room-summary" aria-label="房间状态">
-        <span className="secure-dot" />
-        <strong>{t(preferences.locale, 'turn')}</strong>
-        <time>{remaining}</time>
-      </div>
-      <nav className="top-actions" aria-label="房间控制">
+      <div className="topbar-inner">
+        <Brand />
+        <div className="room-summary" aria-label="房间状态">
+          <span className="secure-dot" />
+          <strong>{t(preferences.locale, 'turn')}</strong>
+          <time>{remaining}</time>
+        </div>
+        <nav className="top-actions" aria-label="房间控制">
         <div className="popover-anchor">
           <button className="top-action" type="button" aria-expanded={panel === 'members'} onClick={() => toggle('members')}>
             <Users /><span>{t(preferences.locale, 'members')} {room.members.length}</span><CaretDown />
@@ -87,7 +89,7 @@ export function RoomTopBar({ room, preferences, onPreferences, onLeave, onDestro
               <ul className="member-list">
                 {[...room.members].sort((a, b) => Number(b.isOwner) - Number(a.isOwner) || a.joinedAt - b.joinedAt).map((member) => (
                   <li key={member.id}>
-                    <span className="avatar" aria-hidden="true">{member.nickname.slice(0, 1).toUpperCase()}</span>
+                    <MemberAvatar seed={member.identityPublicKey} />
                     <span className="member-copy">
                       <strong>{member.nickname}{member.id === room.memberId ? '（你）' : ''}</strong>
                       {member.isOwner ? <small>{t(preferences.locale, 'owner')}</small> : null}
@@ -95,7 +97,6 @@ export function RoomTopBar({ room, preferences, onPreferences, onLeave, onDestro
                   </li>
                 ))}
               </ul>
-              <p className="popover-note">{t(preferences.locale, 'relayNotice')}</p>
             </section>
           ) : null}
         </div>
@@ -140,7 +141,8 @@ export function RoomTopBar({ room, preferences, onPreferences, onLeave, onDestro
             </section>
           ) : null}
         </div>
-      </nav>
+        </nav>
+      </div>
     </header>
   )
 }

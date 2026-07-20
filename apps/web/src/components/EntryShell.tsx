@@ -1,5 +1,4 @@
 import { Moon, ShieldCheck, Sun } from '@phosphor-icons/react'
-import { t } from '../i18n'
 import type { Preferences } from '../preferences'
 import { Brand } from './Brand'
 
@@ -12,7 +11,7 @@ export function EntryShell({ preferences, onPreferences, children }: {
   return (
     <div className="entry-shell">
       <header className="entry-header">
-        <Brand tagline={t(preferences.locale, 'tagline')} />
+        <Brand />
         <div className="entry-header-actions">
           <button className="icon-button" type="button" aria-label="切换语言" onClick={() => onPreferences({ ...preferences, locale: preferences.locale === 'zh-CN' ? 'en-US' : 'zh-CN' })}>{preferences.locale === 'zh-CN' ? 'EN' : '中'}</button>
           <button className="icon-button" type="button" aria-label="切换主题" onClick={() => onPreferences({ ...preferences, theme: nextTheme })}>{nextTheme === 'dark' ? <Moon /> : <Sun />}</button>

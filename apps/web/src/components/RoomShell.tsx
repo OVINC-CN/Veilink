@@ -1,4 +1,4 @@
-import { LockKey } from '@phosphor-icons/react'
+import { LockKey, SpinnerGap } from '@phosphor-icons/react'
 import { useEffect, useRef } from 'react'
 import { t } from '../i18n'
 import type { ActiveRoom, ChatMessage, RichTextDocument } from '../models'
@@ -6,6 +6,7 @@ import type { Preferences } from '../preferences'
 import { AttachmentPreview } from './AttachmentPreview'
 import { ChatComposer } from './ChatComposer'
 import { LocalLinkCard } from './LocalLinkCard'
+import { MemberAvatar } from './MemberAvatar'
 import { RichText } from './RichText'
 import { extractLinks } from './richTextUtils'
 import { RoomTopBar } from './RoomTopBar'
@@ -14,7 +15,7 @@ interface RoomShellProps {
   room: ActiveRoom
   messages: ChatMessage[]
   preferences: Preferences
-  connected: boolean
+  connectionState: 'connecting' | 'ready'
   error?: string
   onPreferences: (next: Preferences) => void
   onSend: (document: RichTextDocument) => Promise<void> | void
@@ -30,10 +31,20 @@ function formatTime(timestamp: number, locale: string): string {
 export function RoomShell(props: RoomShellProps) {
   const { room, messages, preferences } = props
   const end = useRef<HTMLDivElement>(null)
+  const previousLastMessageId = useRef<string | undefined>(undefined)
+  const lastMessage = messages.at(-1)
+  const lastMessageId = lastMessage?.id
+  const lastMessageSenderId = lastMessage?.senderId
 
   useEffect(() => {
-    end.current?.scrollIntoView({ block: 'end' })
-  }, [messages])
+    if (!lastMessageId || previousLastMessageId.current === lastMessageId) return
+    previousLastMessageId.current = lastMessageId
+    if (lastMessageSenderId !== room.memberId) return
+    const frame = window.requestAnimationFrame(() => {
+      end.current?.scrollIntoView({ block: 'end', behavior: 'smooth' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [lastMessageId, lastMessageSenderId, room.memberId])
 
   return (
     <div className={`app-shell density-${preferences.density}`}>
@@ -52,7 +63,7 @@ export function RoomShell(props: RoomShellProps) {
             const links = extractLinks(message.document)
             return (
               <article className="message" key={message.id}>
-                <span className="avatar message-avatar" aria-hidden="true">{message.senderName.slice(0, 1).toUpperCase()}</span>
+                <MemberAvatar seed={message.senderIdentityPublicKey} className="message-avatar" />
                 <div className="message-body">
                   <header>
                     <strong>{message.senderName}</strong>
@@ -69,15 +80,17 @@ export function RoomShell(props: RoomShellProps) {
         </section>
         <div className="composer-region">
           {props.error ? <div className="room-error" role="alert">{props.error}</div> : null}
+          {props.connectionState === 'connecting' ? (
+            <div className="connection-status" role="status" aria-live="polite"><SpinnerGap /><span>{t(preferences.locale, 'connectionPending')}</span></div>
+          ) : null}
           <ChatComposer
-            disabled={!props.connected}
+            connectionState={props.connectionState}
             preferences={preferences}
-            placeholder={t(preferences.locale, 'composer')}
+            placeholder={props.connectionState === 'ready' ? t(preferences.locale, 'composer') : t(preferences.locale, 'composerConnecting')}
             sendLabel={t(preferences.locale, 'send')}
             onSend={props.onSend}
             onFiles={props.onFiles}
           />
-          <p>{t(preferences.locale, 'relayNotice')}</p>
         </div>
       </main>
     </div>

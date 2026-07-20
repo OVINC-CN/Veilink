@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   AttachmentMetadataSchema,
   ChatPayloadSchema,
@@ -283,12 +283,67 @@ export default function App() {
   const messagesRef = useRef<ChatMessage[]>([])
   const runtimeRef = useRef<SessionRuntime | undefined>(undefined)
   const pendingJoinRef = useRef<PendingJoin | undefined>(undefined)
+  const entryIdentityRef = useRef<SessionIdentity | undefined>(undefined)
+  const entryIdentityGenerationRef = useRef(0)
   const stopRuntimeRef = useRef<(sendLeave: boolean) => void>(() => undefined)
   const [createdDetails, setCreatedDetails] = useState<{ pin: string; invitation: string }>()
+  const [entryIdentityPublicKey, setEntryIdentityPublicKey] = useState<string>()
+  const [entryIdentityBusy, setEntryIdentityBusy] = useState(false)
+
+  const discardEntryIdentity = useCallback((): void => {
+    entryIdentityGenerationRef.current += 1
+    const identity = entryIdentityRef.current
+    entryIdentityRef.current = undefined
+    if (identity) destroyIdentity(identity)
+  }, [])
+
+  const regenerateEntryIdentity = useCallback(async (): Promise<void> => {
+    const generation = entryIdentityGenerationRef.current + 1
+    entryIdentityGenerationRef.current = generation
+    setEntryIdentityBusy(true)
+    try {
+      const identity = await createSessionIdentity()
+      if (entryIdentityGenerationRef.current !== generation) {
+        destroyIdentity(identity)
+        return
+      }
+      const previous = entryIdentityRef.current
+      entryIdentityRef.current = identity
+      setEntryIdentityPublicKey(bytesToBase64Url(identity.publicKey))
+      if (previous) destroyIdentity(previous)
+    } catch (caught) {
+      if (entryIdentityGenerationRef.current === generation) {
+        setError(caught instanceof Error ? caught.message : '无法生成随机头像')
+      }
+    } finally {
+      if (entryIdentityGenerationRef.current === generation) setEntryIdentityBusy(false)
+    }
+  }, [])
+
+  const takeEntryIdentity = (): SessionIdentity | undefined => {
+    const identity = entryIdentityRef.current
+    if (!identity) return undefined
+    entryIdentityRef.current = undefined
+    setEntryIdentityPublicKey(undefined)
+    return identity
+  }
 
   useEffect(() => {
     preferencesRef.current = preferences
   }, [preferences])
+
+  useEffect(() => {
+    if (
+      (stage === 'create' || stage === 'join') &&
+      !busy &&
+      !entryIdentityBusy &&
+      !entryIdentityRef.current &&
+      !pendingJoinRef.current &&
+      !runtimeRef.current
+    ) {
+      void regenerateEntryIdentity()
+    }
+  }, [busy, entryIdentityBusy, regenerateEntryIdentity, stage])
 
   const updateRoom = (next: ActiveRoom | ((current: ActiveRoom) => ActiveRoom)): void => {
     const resolved = typeof next === 'function'
@@ -353,7 +408,7 @@ export default function App() {
         !roomRef.current?.members.some((member) => member.id === memberId) ||
         runtime.mesh.connectedMemberIds().includes(memberId)
       ) return
-      setError('30 秒内未能建立统一传输链路，当前成员已自动退出。')
+      setError('连接超时，已自动退出聊天室，请重试。')
       stopRuntime(true)
       window.history.replaceState(null, '', '/')
       initialRoomId.current = undefined
@@ -441,6 +496,7 @@ export default function App() {
   useEffect(() => {
     const pageHide = (): void => {
       stopRuntimeRef.current(true)
+      discardEntryIdentity()
       initialRoomId.current = undefined
       window.history.replaceState(null, '', '/')
       setStage('create')
@@ -449,8 +505,9 @@ export default function App() {
     return () => {
       window.removeEventListener('pagehide', pageHide)
       stopRuntimeRef.current(true)
+      discardEntryIdentity()
     }
-  }, [])
+  }, [discardEntryIdentity])
 
   const scheduleTurnRefresh = (runtime: SessionRuntime, credentials: TurnCredentials): void => {
     if (runtime.turnRefreshTimer !== undefined) window.clearTimeout(runtime.turnRefreshTimer)
@@ -574,6 +631,7 @@ export default function App() {
         id: `${sender.id}:${messageId}`,
         senderId: sender.id,
         senderName: sender.nickname,
+        senderIdentityPublicKey: sender.identityPublicKey,
         sentAt,
         document: payload.document as RichTextDocument,
         attachments: [],
@@ -626,6 +684,7 @@ export default function App() {
         id: `${sender.id}:${messageId}`,
         senderId: sender.id,
         senderName: sender.nickname,
+        senderIdentityPublicKey: sender.identityPublicKey,
         sentAt,
         document: attachmentDocument(metadata.fileName),
         attachments: [{
@@ -815,10 +874,15 @@ export default function App() {
   }
 
   const createRoom = async (rawNickname: string): Promise<void> => {
+    const entryIdentity = takeEntryIdentity()
+    if (!entryIdentity) {
+      setError('随机头像仍在生成，请稍候重试。')
+      return
+    }
     setBusy(true)
     setError(undefined)
     let keys: DerivedKeys | undefined
-    let identity: SessionIdentity | undefined
+    let identity: SessionIdentity | undefined = entryIdentity
     let signal: SignalClient | undefined
     try {
       const nickname = NicknameSchema.parse(rawNickname)
@@ -827,7 +891,6 @@ export default function App() {
       const pin = generatePin()
       await loadPublicConfig()
       keys = await deriveRoomKeys(pin, roomId, secret)
-      identity = await createSessionIdentity()
       signal = new SignalClient(roomId)
       const confirmation = await signal.createRoom({
         nickname,
@@ -891,16 +954,20 @@ export default function App() {
 
   const joinRoom = async (rawNickname: string, pin: string): Promise<void> => {
     if (!initialRoomId.current || !linkSecret) return
+    const entryIdentity = takeEntryIdentity()
+    if (!entryIdentity) {
+      setError('随机头像仍在生成，请稍候重试。')
+      return
+    }
     setBusy(true)
     setError(undefined)
     let keys: DerivedKeys | undefined
-    let identity: SessionIdentity | undefined
+    let identity: SessionIdentity | undefined = entryIdentity
     let signal: SignalClient | undefined
     try {
       const nickname = NicknameSchema.parse(rawNickname)
       await loadPublicConfig()
       keys = await deriveRoomKeys(pin, initialRoomId.current, linkSecret)
-      identity = await createSessionIdentity()
       signal = new SignalClient(initialRoomId.current)
       const challenge = await signal.beginJoin(nickname, IdentityPublicKeySchema.parse(bytesToBase64Url(identity.publicKey)))
       pendingJoinRef.current = { nickname, identity, signal, keys, challenge }
@@ -942,6 +1009,7 @@ export default function App() {
         id: `${self.id}:${messageId}`,
         senderId: self.id,
         senderName: self.nickname,
+        senderIdentityPublicKey: self.identityPublicKey,
         sentAt: Date.now(),
         document: payload.document as RichTextDocument,
         attachments: [],
@@ -1009,6 +1077,7 @@ export default function App() {
               id: `${self.id}:${messageId}`,
               senderId: self.id,
               senderName: self.nickname,
+              senderIdentityPublicKey: self.identityPublicKey,
               sentAt: Date.now(),
               document: attachmentDocument(fileName),
               attachments: [{ id: viewId, name: fileName, mime: metadata!.mimeType, size: file.size, status: 'sending', progress: 0, previewable: validatedMedia.previewable, objectUrl }],
@@ -1063,13 +1132,13 @@ export default function App() {
   }
 
   if (stage === 'room' && room) {
-    return <RoomShell room={room} messages={messages} preferences={preferences} connected={transportReady} error={error} onPreferences={setPreferences} onSend={sendDocument} onFiles={sendFiles} onLeave={leaveRoom} onDestroy={destroyRoom} />
+    return <RoomShell room={room} messages={messages} preferences={preferences} connectionState={transportReady ? 'ready' : 'connecting'} error={error} onPreferences={setPreferences} onSend={sendDocument} onFiles={sendFiles} onLeave={leaveRoom} onDestroy={destroyRoom} />
   }
 
   return (
     <EntryShell preferences={preferences} onPreferences={setPreferences}>
-      {stage === 'create' ? <CreateRoomView preferences={preferences} busy={busy} error={error} onCreate={createRoom} /> : null}
-      {stage === 'join' ? <JoinRoomView preferences={preferences} hasLinkSecret={Boolean(linkSecret)} busy={busy} error={error} onJoin={joinRoom} /> : null}
+      {stage === 'create' ? <CreateRoomView preferences={preferences} busy={busy} avatarSeed={entryIdentityPublicKey} avatarBusy={entryIdentityBusy} error={error} onRegenerateAvatar={regenerateEntryIdentity} onCreate={createRoom} /> : null}
+      {stage === 'join' ? <JoinRoomView preferences={preferences} hasLinkSecret={Boolean(linkSecret)} busy={busy} avatarSeed={entryIdentityPublicKey} avatarBusy={entryIdentityBusy} error={error} onRegenerateAvatar={regenerateEntryIdentity} onJoin={joinRoom} /> : null}
       {stage === 'created' && createdDetails ? <RoomCreatedView pin={createdDetails.pin} invitation={createdDetails.invitation} preferences={preferences} onContinue={() => { setCreatedDetails(undefined); setStage('room') }} /> : null}
     </EntryShell>
   )
