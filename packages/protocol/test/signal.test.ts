@@ -5,6 +5,7 @@ import {
   ClientSignalEnvelopeSchema,
   IdentityPublicKeySchema,
   MemberIdSchema,
+  PROTOCOL_VERSION,
   RequestIdSchema,
   RoomIdSchema,
   RoomSnapshotSchema,
@@ -65,7 +66,7 @@ describe("room snapshot invariants", () => {
 describe("versioned signaling envelopes", () => {
   it("strictly parses a room creation request", () => {
     const message = {
-      v: 2,
+      v: PROTOCOL_VERSION,
       type: "room.create",
       requestId,
       roomId,
@@ -85,7 +86,7 @@ describe("versioned signaling envelopes", () => {
 
   it("rejects legacy P2P creation and mode-switch requests", () => {
     const p2pCreation = {
-      v: 2,
+      v: PROTOCOL_VERSION,
       type: "room.create",
       roomId,
       payload: {
@@ -96,7 +97,7 @@ describe("versioned signaling envelopes", () => {
       },
     };
     const modeSwitch = {
-      v: 2,
+      v: PROTOCOL_VERSION,
       type: "room.mode.request",
       roomId,
       payload: { mode: "p2p", expectedVersion: 1 },
@@ -125,7 +126,7 @@ describe("versioned signaling envelopes", () => {
 
   it("accepts a bounded server error without requiring a room ID", () => {
     const error = {
-      v: 2,
+      v: PROTOCOL_VERSION,
       type: "error",
       requestId,
       payload: { code: "rate_limited", message: "Try again later", retryAfterMs: 1_000 },
@@ -135,7 +136,7 @@ describe("versioned signaling envelopes", () => {
 
   it("rejects SDP beyond the signaling limit", () => {
     const message = {
-      v: 2,
+      v: PROTOCOL_VERSION,
       type: "rtc.description",
       roomId,
       payload: {

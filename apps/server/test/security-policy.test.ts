@@ -7,6 +7,7 @@ describe('deployment and RTC security policy', () => {
     expect(() => loadConfig({
       NODE_ENV: 'production',
       APP_ORIGIN: 'http://veilink.example',
+      REDIS_URL: 'redis://127.0.0.1:6379',
     })).toThrow('must use HTTPS')
   })
 
@@ -21,6 +22,15 @@ describe('deployment and RTC security policy', () => {
     expect(() => loadConfig({
       NODE_ENV: 'test',
       TURN_REST_SECRET: 'a-production-grade-turn-secret-value',
+      REDIS_URL: 'redis://127.0.0.1:6379',
     })).toThrow('TURN_URLS is required')
+  })
+
+  it('requires Redis configuration in every environment', () => {
+    expect(() => loadConfig({
+      NODE_ENV: 'test',
+      TURN_REST_SECRET: 'a-production-grade-turn-secret-value',
+      TURN_URLS: 'turn:turn.example:3478',
+    })).toThrow('REDIS_URL is required')
   })
 })

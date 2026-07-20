@@ -922,9 +922,9 @@ export default function App() {
       const roomId = generateRoomId()
       const secret = generateLinkSecret()
       const pin = generatePin()
-      await loadPublicConfig()
+      const publicConfig = await loadPublicConfig()
       keys = await deriveRoomKeys(pin, roomId, secret)
-      signal = new SignalClient(roomId)
+      signal = new SignalClient(roomId, publicConfig.disconnectGraceMs)
       const confirmation = await signal.createRoom({
         nickname,
         admissionKey: keys.admissionKey,
@@ -999,9 +999,9 @@ export default function App() {
     let signal: SignalClient | undefined
     try {
       const nickname = NicknameSchema.parse(rawNickname)
-      await loadPublicConfig()
+      const publicConfig = await loadPublicConfig()
       keys = await deriveRoomKeys(pin, initialRoomId.current, linkSecret)
-      signal = new SignalClient(initialRoomId.current)
+      signal = new SignalClient(initialRoomId.current, publicConfig.disconnectGraceMs)
       const challenge = await signal.beginJoin(nickname, IdentityPublicKeySchema.parse(bytesToBase64Url(identity.publicKey)))
       pendingJoinRef.current = { nickname, identity, signal, keys, challenge }
       keys = undefined

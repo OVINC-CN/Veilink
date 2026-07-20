@@ -11,6 +11,8 @@ export interface ServerConfig {
   appOrigin?: string
   tlsCertFile?: string
   tlsKeyFile?: string
+  redisUrl: string
+  redisKeyPrefix: string
   roomTtlMs: number
   maxRooms: number
   maxConnections: number
@@ -130,6 +132,32 @@ function parseAppOrigin(value: string | undefined, production: boolean): string 
   return url.origin
 }
 
+function parseRedisUrl(value: string | undefined): string {
+  if (value === undefined || value.trim() === '') throw new Error('REDIS_URL is required')
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error('REDIS_URL must be an absolute redis:// or rediss:// URL')
+  }
+  if (
+    (url.protocol !== 'redis:' && url.protocol !== 'rediss:') ||
+    url.hostname === '' ||
+    url.hash !== ''
+  ) {
+    throw new Error('REDIS_URL must be an absolute redis:// or rediss:// URL')
+  }
+  return value
+}
+
+function parseRedisKeyPrefix(value: string | undefined): string {
+  const prefix = value?.trim() || 'veilink'
+  if (!/^[A-Za-z0-9:_-]{1,96}$/u.test(prefix)) {
+    throw new Error('REDIS_KEY_PREFIX may contain only letters, numbers, colon, underscore and dash')
+  }
+  return prefix
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const appOrigin = parseAppOrigin(env.APP_ORIGIN, env.NODE_ENV === 'production')
   const tlsCertFile = env.TLS_CERT_FILE?.trim()
@@ -156,6 +184,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ...(appOrigin === undefined ? {} : { appOrigin }),
     ...(tlsCertFile ? { tlsCertFile } : {}),
     ...(tlsKeyFile ? { tlsKeyFile } : {}),
+    redisUrl: parseRedisUrl(env.REDIS_URL),
+    redisKeyPrefix: parseRedisKeyPrefix(env.REDIS_KEY_PREFIX),
     roomTtlMs: roomTtlSeconds * 1_000,
     maxRooms: parseInteger(env.MAX_ROOMS, 1_000, 'MAX_ROOMS', 1, 100_000),
     maxConnections: parseInteger(env.MAX_CONNECTIONS, 2_048, 'MAX_CONNECTIONS', 1, 100_000),
@@ -170,7 +200,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ),
     maxMembers: 8,
     heartbeatIntervalMs: 15_000,
-    disconnectGraceMs: 30_000,
+    disconnectGraceMs: parseInteger(
+      env.RECONNECT_GRACE_SECONDS,
+      30,
+      'RECONNECT_GRACE_SECONDS',
+      1,
+      900,
+    ) * 1_000,
     challengeTtlMs: 30_000,
     trustProxy: parseTrustProxy(env.TRUST_PROXY_CIDRS),
     staticRoot:

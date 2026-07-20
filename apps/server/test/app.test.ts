@@ -6,12 +6,15 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { buildApp, type AppContext } from '../src/app.js'
 import { loadConfig } from '../src/config.js'
+import { clearRedisPrefix, testRedisPrefix, testRedisUrl } from './redis-test.js'
 
 let context: AppContext | undefined
 let temporaryStaticRoot: string | undefined
 
 afterEach(async () => {
+  const redisPrefix = context?.config.redisKeyPrefix
   await context?.app.close()
+  if (redisPrefix !== undefined) await clearRedisPrefix(redisPrefix)
   if (temporaryStaticRoot !== undefined) {
     await rm(temporaryStaticRoot, { recursive: true, force: true })
   }
@@ -24,6 +27,8 @@ describe('Fastify application', () => {
     const config = loadConfig({
       NODE_ENV: 'test',
       APP_ORIGIN: 'https://veilink.example',
+      REDIS_URL: testRedisUrl(),
+      REDIS_KEY_PREFIX: testRedisPrefix('app-health'),
       WEB_DIST_DIR: '/path/that/does/not/exist',
       TURN_REST_SECRET: 'a-production-grade-turn-secret-value',
       TURN_URLS: 'turn:turn.example:3478?transport=udp',
@@ -45,13 +50,15 @@ describe('Fastify application', () => {
     expect(publicConfig.statusCode).toBe(200)
     expect(publicConfig.json()).not.toHaveProperty('turnRestSecret')
     expect(publicConfig.json()).not.toHaveProperty('ice')
-    expect(publicConfig.json().protocolVersion).toBe(2)
+    expect(publicConfig.json().protocolVersion).toBe(3)
   })
 
   it('rejects a cross-origin browser request to guarded endpoints', async () => {
     const config = loadConfig({
       NODE_ENV: 'test',
       APP_ORIGIN: 'https://veilink.example',
+      REDIS_URL: testRedisUrl(),
+      REDIS_KEY_PREFIX: testRedisPrefix('app-origin'),
       WEB_DIST_DIR: '/path/that/does/not/exist',
       TURN_REST_SECRET: 'a-production-grade-turn-secret-value',
       TURN_URLS: 'turn:turn.example:3478?transport=udp',
@@ -72,6 +79,8 @@ describe('Fastify application', () => {
     const config = loadConfig({
       NODE_ENV: 'test',
       APP_ORIGIN: 'https://veilink.example',
+      REDIS_URL: testRedisUrl(),
+      REDIS_KEY_PREFIX: testRedisPrefix('app-static'),
       WEB_DIST_DIR: temporaryStaticRoot,
       TURN_REST_SECRET: 'a-production-grade-turn-secret-value',
       TURN_URLS: 'turn:turn.example:3478?transport=udp',
@@ -91,7 +100,11 @@ describe('Fastify application', () => {
   it('requires an exact application origin in production', () => {
     expect(() => loadConfig({ NODE_ENV: 'production' })).toThrow('APP_ORIGIN is required')
     expect(() =>
-      loadConfig({ NODE_ENV: 'production', APP_ORIGIN: 'https://veilink.example/' }),
+      loadConfig({
+        NODE_ENV: 'production',
+        APP_ORIGIN: 'https://veilink.example/',
+        REDIS_URL: testRedisUrl(),
+      }),
     ).toThrow('exact HTTP(S) origin')
   })
 })

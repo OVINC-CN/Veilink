@@ -24,7 +24,7 @@
   <a href="README.md">English</a> | <strong>简体中文</strong>
 </p>
 
-Veilink 不使用数据库，也不会将聊天内容上传到应用服务器。房间和信令状态仅短暂保存在进程内存中；空房只会保留到有效期结束。
+Veilink 不会将聊天内容上传到应用服务器。Redis 只保存带过期时间的房间、成员、准入、重连及滥用防护元数据，使仍打开的浏览器可在应用重启或切换副本后恢复。
 
 > **安全状态：** 项目目前仍是早期实现。用于敏感场景前，请自行审查威胁模型与部署配置。
 
@@ -34,14 +34,14 @@ Veilink 不使用数据库，也不会将聊天内容上传到应用服务器。
 - 浏览器本地使用链接密钥和 PIN 派生 E2EE 密钥；读取 URL Fragment 后立即从地址栏移除。
 - 聊天数据通过 TURN 中继的 WebRTC DataChannel 传输，Fastify 只负责房间成员、WebRTC 信令和短期中继凭据。
 - 所有 WebRTC 连接都强制通过 TURN，参与者之间不会建立直连或暴露彼此公网 IP。
-- 房间和信令状态仅保存在进程内存中。空房会保留至有效期结束；房主手动销毁或应用重启也会销毁聊天室。
+- 信令元数据带过期时间存入 Redis。空房会保留至有效期结束，应用重启或替换副本后浏览器可自动恢复连接。
 - 支持受限富文本、本地生成的隐私链接卡片，以及受支持附件的内存预览。
 
 ## 项目架构
 
 项目采用 pnpm workspace：React/Vite 浏览器客户端、Fastify 信令服务器以及共享协议包。生产容器从同一个 Origin 提供前端和 API。应用与 coturn 共享部署密钥，并为客户端签发短期 REST/HMAC TURN 凭据。
 
-系统刻意不包含数据库、缓存服务、对象存储、文件上传接口、服务端聊天历史或可写数据卷。部署只支持一个应用副本，禁止使用 `docker compose up --scale app=...` 扩容；多个副本无法共享房间状态。应用重启会使全部房间失效。
+Redis 是信令元数据的权威存储，并负责应用副本之间的事件协调。系统仍不包含对象存储、文件上传接口或服务端聊天历史。应用可在支持 WebSocket 的负载均衡器后滚动发布多个副本，且不要求会话粘滞。
 
 ## 环境要求
 
@@ -49,10 +49,14 @@ Veilink 不使用数据库，也不会将聊天内容上传到应用服务器。
 - 容器部署：Docker Engine、Docker Compose v2
 - TURN 主机具备公网 IPv4，并开放 UDP/TCP 3478 及 UDP 49160–49200
 - 公网聊天域名与有效 TLS 证书
+- 外部持久化、高可用 Redis；跨越可信私网边界时必须启用认证和 TLS
 
 ## 快速开始
 
+服务端测试与生产使用同一套 Redis 实现。请将 `REDIS_URL` 指向专用测试 Redis；测试会隔离键名且不会执行 `FLUSHDB`。
+
 ```bash
+export REDIS_URL=redis://127.0.0.1:6379/0
 pnpm install --frozen-lockfile
 pnpm lint
 pnpm typecheck
@@ -71,7 +75,7 @@ pnpm build
    openssl rand -hex 32
    ```
 
-   将生成值写入 `TURN_REST_SECRET`。把 `APP_ORIGIN` 设置为浏览器实际访问的完整 HTTPS Origin，并替换所有示例 TURN 域名和 IP。`.env` 必须设置严格权限且不得提交到版本库。
+   将生成值写入 `TURN_REST_SECRET`。把 `APP_ORIGIN` 设置为浏览器实际访问的完整 HTTPS Origin，配置 `REDIS_URL`，并替换所有示例 TURN 域名和 IP。`.env` 必须设置严格权限且不得提交到版本库。
 
 2. 检查 Compose 固定子网是否与主机现有网络冲突。如需修改，必须同时调整 `VEILINK_SUBNET`、`VEILINK_GATEWAY` 以及受信代理地址。
 
@@ -83,7 +87,7 @@ pnpm build
    docker compose up -d
    ```
 
-应用默认仅发布到 `127.0.0.1:3000`，必须放在外部 HTTPS 反向代理之后。coturn 对公网开放 UDP/TCP 3478 和配置的 UDP relay 端口段。Compose 不创建持久卷；两个容器均使用只读根文件系统，仅将不可避免的运行时文件写入小型 tmpfs。
+应用默认仅发布到 `127.0.0.1:3000`，必须放在外部 HTTPS 反向代理之后。coturn 对公网开放 UDP/TCP 3478 和配置的 UDP relay 端口段。Redis 位于本 Compose 项目之外；Compose 不创建本地持久卷，两个容器均使用只读根文件系统，仅将不可避免的运行时文件写入小型 tmpfs。
 Compose 还会禁用 Docker 容器日志驱动，避免 stdout/stderr 形成另一份持久连接日志；内存上限和“内存+交换区”上限设置为相同值，在容器运行时支持时阻止容器内存进入交换区，并禁用 Core Dump。
 
 应用也可以直接终止 HTTPS。将 `TLS_CERT_FILE` 和 `TLS_KEY_FILE` 同时设置为应用容器内可读的 PEM 路径，只读挂载这两个文件，在目标网卡上发布应用端口，并把 `APP_ORIGIN` 设置为完全一致的 HTTPS Origin。两个变量都留空时，继续使用默认的外部反向代理方案。
@@ -135,7 +139,10 @@ docker compose -f docker-compose.yml \
 | `VEILINK_IMAGE`、`VEILINK_TURN_IMAGE` | 应用和加固 coturn 镜像标签 | 默认 GHCR `latest`；生产固定 `sha-*` |
 | `TLS_CERT_FILE`、`TLS_KEY_FILE` | 可选的应用原生 HTTPS PEM 路径 | 必须同时设置或同时留空 |
 | `TRUST_PROXY_CIDRS` | 直接反向代理的 CIDR | 必填、必须精确 |
-| `ROOM_TTL_SECONDS` | 内存聊天室存活时间 | `86400`，不可超过 |
+| `REDIS_URL` | 权威外部 Redis 地址 | 必填 `redis://` 或 `rediss://` URL |
+| `REDIS_KEY_PREFIX` | 按环境隔离的 Redis 命名空间 | `veilink` |
+| `RECONNECT_GRACE_SECONDS` | 浏览器及会话恢复窗口 | `30` |
+| `ROOM_TTL_SECONDS` | Redis 房间元数据存活时间 | `86400`，不可超过 |
 | `TURN_URLS` | 浏览器使用的 TURN URL，逗号分隔 | 必填 |
 | `TURN_REALM` | 应用和 coturn 共享的 Realm | `veilink` |
 | `TURN_REST_SECRET` | 应用和 coturn 共享的 HMAC 密钥 | 必填，使用 32 个随机字节 |
@@ -151,7 +158,7 @@ docker compose -f docker-compose.yml \
 
 ## 安全与隐私
 
-Veilink 不进行应用级持久化，但普通浏览器和操作系统无法绝对保证内存、Blob 实现、交换区、崩溃转储、历史同步、截图、扩展或下载文件从未写入存储介质。因此，“不留痕”是应用可控范围内的尽力保证，并非操作系统级承诺。
+Veilink 会在 Redis 中持久化带过期时间的信令元数据，但绝不保存消息或文件内容。普通浏览器和操作系统无法绝对保证内存、Blob 实现、交换区、崩溃转储、历史同步、截图、扩展或下载文件从未写入存储介质。因此，“不留痕”是应用可控范围内的尽力保证，并非操作系统级承诺。
 
 服务器宿主机同样存在这一边界：Compose 会在运行时支持时禁用容器交换区和 Core Dump，但休眠、虚拟机快照、宿主机崩溃采集和物理内存策略仍由部署方负责。
 
@@ -166,16 +173,20 @@ Veilink 不进行应用级持久化，但普通浏览器和操作系统无法绝
 
 E2EE 可以阻止信令服务器和 TURN 服务器读取消息及文件内容，但不会向基础设施运营者隐藏连接元数据，也无法防御已失陷终端、恶意浏览器扩展或被替换的前端 JavaScript。强制中继可避免参与者获知彼此公网 IP，但基础设施运营者仍可观察连接元数据。
 
+Redis 记录包含房间 ID、准入校验值、成员昵称和公开身份密钥、重连 Token 哈希、会话租约以及用于滥用防护的 HMAC 标识；不会包含 PIN、链接密钥、派生 E2EE 密钥、消息/文件内容、明文重连 Token 或原始来源 IP。Redis 必须执行过期策略，并应按恢复要求配置持久化、高可用、访问控制、加密传输和运维备份。
+
 TURN REST 凭据和已建立的 allocation 无法按房间逐一即时吊销；默认凭据和 allocation 最长有效 10 分钟。房间销毁会立即删除应用内状态，但已有 TURN allocation 仍可能存活至 coturn 超时，且无法读取 E2EE 内容。
 
 ## 运维检查
 
-- 应用始终保持单副本，并预期每次重启都会销毁活动房间。
+- 首次从 Redis 接入前的版本升级时，无法导入只存在于旧进程内的房间；请为该次切换安排一次性会话中断。
+- 在 `RECONNECT_GRACE_SECONDS` 内滚动替换副本，并确保负载均衡器后至少有一个健康副本。
+- 监控 Redis 可用性和过期清理；应用会失败关闭，不会降级为各副本独立内存状态。
 - `TURN_REST_SECRET` 必须在应用和 coturn 中同步轮换；轮换会立即使现有 TURN 凭据失效。
 - 严格限制 `.env` 和 TLS 私钥权限，CI 中不得打印其内容。
 - 按隐私策略关闭或匿名化代理、负载均衡器、防火墙和 DNS 查询日志。
 - 定期更新 Node.js、基础镜像、coturn 和依赖；执行 `pnpm audit --prod` 并重新构建镜像。
-- Veilink 没有任何应用数据可备份或恢复。
+- 根据部署的数据保留策略备份 Redis 信令元数据；消息和文件内容仍不进入服务端存储。
 
 ## 许可证
 

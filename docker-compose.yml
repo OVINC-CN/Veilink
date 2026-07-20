@@ -39,6 +39,9 @@ services:
       TLS_KEY_FILE: ${TLS_KEY_FILE:-}
       APP_ORIGIN: ${APP_ORIGIN:?Set APP_ORIGIN to the exact public HTTPS origin}
       TRUST_PROXY_CIDRS: ${TRUST_PROXY_CIDRS:?Set explicit reverse-proxy CIDRs}
+      REDIS_URL: ${REDIS_URL:?Set the external Redis URL}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-veilink}
+      RECONNECT_GRACE_SECONDS: ${RECONNECT_GRACE_SECONDS:-30}
       ROOM_TTL_SECONDS: ${ROOM_TTL_SECONDS:-86400}
       TURN_URLS: ${TURN_URLS:?Set the public TURN URLs}
       TURN_REALM: ${TURN_REALM:-veilink}
@@ -58,16 +61,13 @@ services:
         - CMD
         - node
         - -e
-        - "const s=require('node:net').connect(3000,'127.0.0.1');s.setTimeout(3000);s.on('connect',()=>{s.end();process.exit(0)});s.on('timeout',()=>process.exit(1));s.on('error',()=>process.exit(1))"
+        - "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
     networks:
       - veilink
-    deploy:
-      replicas: 1
-
   turn:
     image: ${VEILINK_TURN_IMAGE:-ghcr.io/ovinc-cn/veilink-turn:latest}
     build:

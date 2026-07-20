@@ -19,8 +19,8 @@ import { isRtcCandidateAllowed, isRtcDescriptionAllowed } from './rtc-policy.js'
 import {
   RoomStore,
   RoomStoreError,
+  type RoomStoreEvent,
   type RoomSession,
-  type WireEvent,
 } from './room-store.js'
 import { decodeKey, randomId, sanitizePublicIp } from './security.js'
 import { createTurnCredential } from './turn.js'
@@ -41,9 +41,14 @@ interface Connection {
   alive: boolean
   malformedMessages: number
   publicIp: string
+  queue: Promise<void>
+  registered: boolean
+  closed: boolean
   binding?: {
     roomId: string
     memberId: string
+    sessionId: string
+    snapshotVersion: number
   }
 }
 
@@ -55,7 +60,6 @@ export interface AppContext {
 
 export interface BuildAppOptions {
   config?: ServerConfig
-  roomStore?: RoomStore
 }
 
 class ActionError extends Error {
@@ -103,7 +107,7 @@ function assertUnbound(connection: Connection): void {
   if (connection.binding !== undefined) throw new ActionError('already_in_room')
 }
 
-function assertBound(connection: Connection, roomId: string): { roomId: string; memberId: string } {
+function assertBound(connection: Connection, roomId: string): NonNullable<Connection['binding']> {
   const binding = connection.binding
   if (binding === undefined || binding.roomId !== roomId) throw new ActionError('not_in_room')
   return binding
@@ -129,6 +133,9 @@ function mapSignalError(error: unknown): SignalErrorCode {
       resume_rejected: 'resume_rejected',
       not_owner: 'forbidden',
       target_not_found: 'member_not_found',
+      rate_limited: 'rate_limited',
+      challenge_rejected: 'challenge_expired',
+      admission_failed: 'bad_proof',
     }[error.code] as SignalErrorCode
   }
   if (error instanceof ActionError) {
@@ -198,44 +205,24 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
     maxRequestsPerSocket: 1_000,
     ...(tls ? { https: tls } : {}),
   })
-  const roomStore =
-    options.roomStore ??
-    new RoomStore({
-      roomTtlMs: config.roomTtlMs,
-      maxRooms: config.maxRooms,
-      maxMembers: config.maxMembers,
-      disconnectGraceMs: config.disconnectGraceMs,
-    })
-  const admission = new AdmissionService({
-    roomStore,
+  const roomStore = new RoomStore({
+    redisUrl: config.redisUrl,
+    redisKeyPrefix: config.redisKeyPrefix,
+    roomTtlMs: config.roomTtlMs,
+    maxRooms: config.maxRooms,
+    maxMembers: config.maxMembers,
+    maxRoomsPerIp: config.maxRoomsPerIp,
+    roomCreateAttemptsPerMinute: config.roomCreateAttemptsPerMinute,
+    maxConnections: config.maxConnections,
+    maxConnectionsPerIp: config.maxConnectionsPerIp,
+    heartbeatIntervalMs: config.heartbeatIntervalMs,
+    disconnectGraceMs: config.disconnectGraceMs,
     challengeTtlMs: config.challengeTtlMs,
+    ipHashSecret: config.turnRestSecret,
   })
-  const roomCreatorIp = new Map<string, string>()
-  const roomsByCreatorIp = new Map<string, Set<string>>()
-  const createRateWindows = new Map<string, { startedAt: number; attempts: number }>()
-  const removeRoomDestroyListener = roomStore.onDestroyed((roomId) => {
-    admission.clearRoom(roomId)
-    const publicIp = roomCreatorIp.get(roomId)
-    if (publicIp !== undefined) {
-      roomCreatorIp.delete(roomId)
-      const rooms = roomsByCreatorIp.get(publicIp)
-      rooms?.delete(roomId)
-      if (rooms?.size === 0) roomsByCreatorIp.delete(publicIp)
-    }
-  })
+  await roomStore.connect()
+  const admission = new AdmissionService({ roomStore })
   const connections = new Map<string, Connection>()
-
-  const consumeRoomCreateAttempt = (publicIp: string): boolean => {
-    const now = Date.now()
-    let window = createRateWindows.get(publicIp)
-    if (!window || now - window.startedAt >= 60_000) {
-      window = { startedAt: now, attempts: 0 }
-      createRateWindows.set(publicIp, window)
-    }
-    if (window.attempts >= config.roomCreateAttemptsPerMinute) return false
-    window.attempts += 1
-    return true
-  }
 
   await app.register(helmet, {
     contentSecurityPolicy: {
@@ -297,7 +284,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
     if (!reply.sent) await reply.code(500).send({ error: 'internal_error' })
   })
 
-  app.get('/healthz', async () => ({ status: 'ok' as const }))
+  app.get('/healthz', async (_request, reply) => {
+    if (!await roomStore.isHealthy()) return reply.code(503).send({ status: 'unavailable' as const })
+    return { status: 'ok' as const }
+  })
   app.get('/api/config', async () => getPublicConfig(config))
 
   await app.register(fastifyWebsocket, {
@@ -340,7 +330,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
     type: 'room.created' | 'room.joined' | 'room.resumed',
     requestId?: string,
   ): void => {
-    connection.binding = { roomId, memberId: session.memberId }
+    connection.binding = {
+      roomId,
+      memberId: session.memberId,
+      sessionId: session.sessionId,
+      snapshotVersion: session.snapshot.snapshotVersion,
+    }
     send(
       connection,
       withRequestId(
@@ -359,39 +354,28 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
     )
   }
 
-  const sinkFor = (connection: Connection, roomId: string) => (event: WireEvent): void => {
-    send(connection, { ...event, roomId })
-    if (event.type === 'room.ended') delete connection.binding
-  }
-
-  const handleMessage = (connection: Connection, message: ClientSignalEnvelope): void => {
+  const handleMessage = async (connection: Connection, message: ClientSignalEnvelope): Promise<void> => {
+    if (connection.closed || !connection.registered) throw new ActionError('session_expired')
     const requestId = message.requestId
     const roomId = message.roomId
 
     switch (message.type) {
       case 'room.create': {
         assertUnbound(connection)
-        if (!consumeRoomCreateAttempt(connection.publicIp)) {
+        if (!await roomStore.consumeRoomCreateAttempt(connection.publicIp)) {
           throw new ActionError('room_create_rate_limited')
-        }
-        if ((roomsByCreatorIp.get(connection.publicIp)?.size ?? 0) >= config.maxRoomsPerIp) {
-          throw new ActionError('room_ip_capacity_reached')
         }
         const admissionKey = decodeKey(message.payload.admissionVerifier)
         if (admissionKey === undefined) throw new ActionError('invalid_admission_verifier')
         try {
-          const session = roomStore.createRoom({
+          const session = await roomStore.createRoom({
             roomId,
             admissionKey,
             nickname: message.payload.nickname,
             identityPublicKey: message.payload.identityPublicKey,
             transportId: connection.id,
-            sink: sinkFor(connection, roomId),
+            publicIp: connection.publicIp,
           })
-          roomCreatorIp.set(roomId, connection.publicIp)
-          const rooms = roomsByCreatorIp.get(connection.publicIp) ?? new Set<string>()
-          rooms.add(roomId)
-          roomsByCreatorIp.set(connection.publicIp, rooms)
           bindSession(connection, roomId, session, 'room.created', requestId)
         } finally {
           admissionKey.fill(0)
@@ -401,7 +385,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
 
       case 'room.challenge': {
         assertUnbound(connection)
-        const challenge = admission.issue(
+        const challenge = await admission.issue(
           roomId,
           connection.id,
           connection.publicIp,
@@ -429,7 +413,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
 
       case 'room.join': {
         assertUnbound(connection)
-        admission.verify({
+        await admission.verify({
           roomId,
           challengeId: message.payload.challengeId,
           proof: message.payload.proof,
@@ -438,12 +422,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
           nickname: message.payload.nickname,
           identityPublicKey: message.payload.identityPublicKey,
         })
-        const session = roomStore.joinRoom({
+        const session = await roomStore.joinRoom({
           roomId,
           nickname: message.payload.nickname,
           identityPublicKey: message.payload.identityPublicKey,
           transportId: connection.id,
-          sink: sinkFor(connection, roomId),
         })
         bindSession(connection, roomId, session, 'room.joined', requestId)
         break
@@ -451,13 +434,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
 
       case 'room.resume': {
         assertUnbound(connection)
-        const session = roomStore.resumeRoom({
+        const session = await roomStore.resumeRoom({
           roomId,
           memberId: message.payload.memberId,
           resumeToken: message.payload.resumeToken,
           identityPublicKey: message.payload.identityPublicKey,
           transportId: connection.id,
-          sink: sinkFor(connection, roomId),
         })
         bindSession(connection, roomId, session, 'room.resumed', requestId)
         break
@@ -465,7 +447,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
 
       case 'room.leave': {
         const binding = assertBound(connection, roomId)
-        roomStore.leave(roomId, binding.memberId, connection.id)
+        await roomStore.leave(roomId, binding.memberId, binding.sessionId)
         delete connection.binding
         connection.socket.close(1_000, 'left room')
         break
@@ -473,7 +455,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
 
       case 'room.destroy': {
         const binding = assertBound(connection, roomId)
-        roomStore.destroyByOwner(roomId, binding.memberId, connection.id)
+        await roomStore.destroyByOwner(roomId, binding.memberId, binding.sessionId)
         break
       }
 
@@ -482,12 +464,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
         if (!isRtcDescriptionAllowed(message.payload.description.sdp ?? '')) {
           throw new ActionError('rtc_transport_policy_violation')
         }
-        roomStore.forwardRtcDescription({
+        await roomStore.forwardRtcEvent({
           roomId,
           senderId: binding.memberId,
-          transportId: connection.id,
+          sessionId: binding.sessionId,
           targetMemberId: message.payload.targetMemberId,
-          description: message.payload.description,
+          type: 'rtc.description',
+          data: message.payload.description,
         })
         break
       }
@@ -497,26 +480,40 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
         if (!isRtcCandidateAllowed(message.payload.candidate.candidate)) {
           throw new ActionError('rtc_transport_policy_violation')
         }
-        roomStore.forwardRtcCandidate({
+        await roomStore.forwardRtcEvent({
           roomId,
           senderId: binding.memberId,
-          transportId: connection.id,
+          sessionId: binding.sessionId,
           targetMemberId: message.payload.targetMemberId,
-          candidate: message.payload.candidate,
+          type: 'rtc.candidate',
+          data: message.payload.candidate,
         })
         break
       }
 
       case 'turn.credentials.refresh': {
         const binding = assertBound(connection, roomId)
+        if (!await roomStore.authorize(roomId, binding.memberId, binding.sessionId)) {
+          throw new ActionError('session_expired')
+        }
         issueTurnCredentials(connection, roomId, binding.memberId, requestId)
         break
       }
 
       case 'heartbeat': {
         const binding = assertBound(connection, roomId)
-        if (!roomStore.touch(roomId, binding.memberId, connection.id)) {
+        const latestSnapshot = await roomStore.touch(roomId, binding.memberId, binding.sessionId)
+        if (latestSnapshot === undefined) {
           throw new ActionError('session_expired')
+        }
+        if (latestSnapshot.snapshotVersion !== binding.snapshotVersion) {
+          binding.snapshotVersion = latestSnapshot.snapshotVersion
+          send(connection, {
+            v: PROTOCOL_VERSION,
+            type: 'room.snapshot',
+            roomId,
+            payload: latestSnapshot,
+          })
         }
         connection.alive = true
         send(
@@ -536,28 +533,62 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
     }
   }
 
+  const handleStoreEvent = (event: RoomStoreEvent): void => {
+    if (event.kind === 'session-replaced') {
+      const connection = connections.get(event.sessionId)
+      if (connection?.binding?.roomId === event.roomId && connection.binding.memberId === event.memberId) {
+        delete connection.binding
+        connection.socket.close(1_008, 'session replaced')
+      }
+      return
+    }
+    for (const connection of connections.values()) {
+      const binding = connection.binding
+      if (binding?.roomId !== event.roomId) continue
+      if (event.excludedMemberId === binding.memberId) continue
+      if (event.targetMemberId !== undefined && event.targetMemberId !== binding.memberId) continue
+      if (event.targetSessionId !== undefined && event.targetSessionId !== binding.sessionId) continue
+      send(connection, { ...event.event, roomId: event.roomId })
+      const payload = event.event.payload
+      if (typeof payload === 'object' && payload !== null && 'snapshotVersion' in payload) {
+        const version = (payload as { snapshotVersion?: unknown }).snapshotVersion
+        if (typeof version === 'number') binding.snapshotVersion = Math.max(binding.snapshotVersion, version)
+      }
+      if (event.event.type === 'room.ended') delete connection.binding
+    }
+  }
+  const removeStoreEventListener = roomStore.onEvent(handleStoreEvent)
+
   app.get('/signal', { websocket: true }, (socket, request) => {
     if (!originAllowed(request.headers.origin, config)) {
       socket.close(1_008, 'forbidden origin')
       return
     }
     const publicIp = sanitizePublicIp(request.ip)
-    const connectionsForIp = [...connections.values()].reduce(
-      (count, connection) => count + Number(connection.publicIp === publicIp),
-      0,
-    )
-    if (connections.size >= config.maxConnections || connectionsForIp >= config.maxConnectionsPerIp) {
-      socket.close(1_013, 'connection capacity reached')
-      return
-    }
     const connection: Connection = {
       id: randomId(16),
       socket: socket as SocketLike,
       alive: true,
       malformedMessages: 0,
       publicIp,
+      queue: Promise.resolve(),
+      registered: false,
+      closed: false,
     }
     connections.set(connection.id, connection)
+    connection.queue = roomStore.registerConnection(connection.id, publicIp)
+      .then((registered) => {
+        if (!registered) {
+          connection.closed = true
+          connection.socket.close(1_013, 'connection capacity reached')
+          return
+        }
+        connection.registered = true
+      })
+      .catch(() => {
+        connection.closed = true
+        connection.socket.close(1_013, 'state unavailable')
+      })
 
     socket.on('message', (raw, isBinary) => {
       if (isBinary) {
@@ -590,29 +621,38 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
         return
       }
 
-      try {
-        handleMessage(connection, parsed.data)
-      } catch (error) {
-        const code = mapSignalError(error)
-        sendSignalError(connection, code, {
-          ...(parsed.data.requestId === undefined ? {} : { requestId: parsed.data.requestId }),
-          roomId: parsed.data.roomId,
-          ...(code === 'rate_limited' ? { retryAfterMs: 10 * 60 * 1_000 } : {}),
+      connection.queue = connection.queue
+        .then(() => handleMessage(connection, parsed.data))
+        .catch((error: unknown) => {
+          if (connection.closed) return
+          const code = mapSignalError(error)
+          sendSignalError(connection, code, {
+            ...(parsed.data.requestId === undefined ? {} : { requestId: parsed.data.requestId }),
+            roomId: parsed.data.roomId,
+            ...(code === 'rate_limited' ? { retryAfterMs: 10 * 60 * 1_000 } : {}),
+          })
+          if (!(error instanceof ActionError)) connection.socket.close(1_013, 'state unavailable')
         })
-      }
     })
 
     socket.on('pong', () => {
       connection.alive = true
       const binding = connection.binding
-      if (binding !== undefined) roomStore.touch(binding.roomId, binding.memberId, connection.id)
+      const refreshes: Array<Promise<unknown>> = [roomStore.refreshConnection(connection.id, connection.publicIp)]
+      if (binding !== undefined) refreshes.push(roomStore.touch(binding.roomId, binding.memberId, binding.sessionId))
+      void Promise.all(refreshes).catch(() => connection.socket.close(1_013, 'state unavailable'))
     })
 
     socket.on('close', () => {
+      connection.closed = true
       connections.delete(connection.id)
-      admission.removeForTransport(connection.id)
       const binding = connection.binding
-      if (binding !== undefined) roomStore.disconnect(binding.roomId, binding.memberId, connection.id)
+      if (binding !== undefined) {
+        void roomStore.disconnect(binding.roomId, binding.memberId, binding.sessionId).catch(() => undefined)
+      }
+      if (connection.registered) {
+        void roomStore.removeConnection(connection.id, connection.publicIp).catch(() => undefined)
+      }
       delete connection.binding
     })
 
@@ -637,13 +677,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
   }, config.heartbeatIntervalMs)
   heartbeatTimer.unref()
 
+  let sweepRunning = false
   const sweepTimer = setInterval(() => {
-    admission.sweep()
-    roomStore.sweep()
-    const now = Date.now()
-    for (const [publicIp, window] of createRateWindows) {
-      if (now - window.startedAt >= 60_000) createRateWindows.delete(publicIp)
-    }
+    if (sweepRunning) return
+    sweepRunning = true
+    void roomStore.sweep()
+      .catch(() => undefined)
+      .finally(() => { sweepRunning = false })
   }, 1_000)
   sweepTimer.unref()
 
@@ -677,13 +717,18 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
   app.addHook('onClose', async () => {
     clearInterval(heartbeatTimer)
     clearInterval(sweepTimer)
-    roomStore.close('server-restarted')
-    removeRoomDestroyListener()
-    for (const connection of connections.values()) connection.socket.close(1_001, 'server shutdown')
+    removeStoreEventListener()
+    const activeConnections = [...connections.values()]
+    await Promise.all(activeConnections.map(async (connection) => {
+      const binding = connection.binding
+      if (binding !== undefined) {
+        await roomStore.disconnect(binding.roomId, binding.memberId, binding.sessionId)
+      }
+      if (connection.registered) await roomStore.removeConnection(connection.id, connection.publicIp)
+    }))
+    for (const connection of activeConnections) connection.socket.close(1_001, 'server shutdown')
     connections.clear()
-    createRateWindows.clear()
-    roomCreatorIp.clear()
-    roomsByCreatorIp.clear()
+    await roomStore.close()
   })
 
   return { app, roomStore, config }

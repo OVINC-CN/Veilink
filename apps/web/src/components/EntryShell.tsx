@@ -22,7 +22,7 @@ export function EntryShell({ preferences, onPreferences, children }: {
       <main className="entry-main">
         <section className="entry-panel">{children}</section>
       </main>
-      <footer className="entry-footer"><ShieldCheck weight="fill" /><span>{zh ? '无 Cookie · 无数据库 · 无服务端消息历史' : 'No cookies · No database · No server-side message history'}</span></footer>
+      <footer className="entry-footer"><ShieldCheck weight="fill" /><span>{zh ? '无 Cookie · Redis 仅存信令元数据 · 无服务端消息历史' : 'No cookies · Redis signaling metadata only · No server-side message history'}</span></footer>
     </div>
   )
 }

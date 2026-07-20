@@ -75,9 +75,11 @@ export class SignalClient {
   private reconnectStartedAt?: number
   private resumeState?: ResumeState
   private closed = false
+  private readonly reconnectWindowMs: number
 
-  constructor(roomId: string) {
+  constructor(roomId: string, reconnectGraceMs = 30_000) {
     this.roomId = RoomIdSchema.parse(roomId)
+    this.reconnectWindowMs = Math.max(1_000, reconnectGraceMs - 2_000)
   }
 
   async connect(): Promise<void> {
@@ -303,7 +305,7 @@ export class SignalClient {
   private scheduleReconnect(): void {
     if (!this.resumeState || this.closed || this.reconnectTimer !== undefined) return
     this.reconnectStartedAt ??= Date.now()
-    if (Date.now() - this.reconnectStartedAt >= 28_000) {
+    if (Date.now() - this.reconnectStartedAt >= this.reconnectWindowMs) {
       this.expireReconnect()
       return
     }
