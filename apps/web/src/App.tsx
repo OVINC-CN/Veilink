@@ -87,6 +87,8 @@ interface SessionRuntime {
   peerViolationWindows: Map<string, PeerViolationWindow>
   peerDataQueues: Map<string, Promise<void>>
   peerConnectionTimers: Map<string, number>
+  initialPeerIds: Set<string>
+  initialConnectionComplete: boolean
   decryptors: Map<string, FileDecryptor>
   attachmentMetadata: Map<string, AttachmentMetadata>
   attachmentReservations: Map<string, number>
@@ -378,13 +380,22 @@ export default function App() {
     })))
   }
 
+  const completeInitialConnectionIfReady = (runtime: SessionRuntime): void => {
+    if (
+      runtime.initialConnectionComplete ||
+      runtime.peerConnectionTimers.size > 0 ||
+      runtimeRef.current !== runtime
+    ) return
+    runtime.initialConnectionComplete = true
+    runtime.initialPeerIds.clear()
+    setTransportReady(true)
+  }
+
   const clearPeerConnectionTimer = (runtime: SessionRuntime, memberId: string): void => {
     const timer = runtime.peerConnectionTimers.get(memberId)
     if (timer !== undefined) window.clearTimeout(timer)
     runtime.peerConnectionTimers.delete(memberId)
-    if (runtime.peerConnectionTimers.size === 0 && runtimeRef.current === runtime) {
-      setTransportReady(true)
-    }
+    completeInitialConnectionIfReady(runtime)
   }
 
   const clearPeerConnectionTimers = (runtime: SessionRuntime): void => {
@@ -395,6 +406,8 @@ export default function App() {
   const armPeerConnectionTimer = (runtime: SessionRuntime, memberId: string): void => {
     if (
       runtimeRef.current !== runtime ||
+      runtime.initialConnectionComplete ||
+      !runtime.initialPeerIds.has(memberId) ||
       !roomRef.current?.members.some((member) => member.id === memberId) ||
       memberId === roomRef.current?.memberId ||
       runtime.mesh.connectedMemberIds().includes(memberId) ||
@@ -405,9 +418,14 @@ export default function App() {
       runtime.peerConnectionTimers.delete(memberId)
       if (
         runtimeRef.current !== runtime ||
+        runtime.initialConnectionComplete ||
+        !runtime.initialPeerIds.has(memberId) ||
         !roomRef.current?.members.some((member) => member.id === memberId) ||
         runtime.mesh.connectedMemberIds().includes(memberId)
-      ) return
+      ) {
+        completeInitialConnectionIfReady(runtime)
+        return
+      }
       setError('连接超时，已自动退出聊天室，请重试。')
       stopRuntime(true)
       window.history.replaceState(null, '', '/')
@@ -418,7 +436,14 @@ export default function App() {
   }
 
   const armRoomConnectionTimers = (runtime: SessionRuntime, members: Member[]): void => {
-    for (const member of members) armPeerConnectionTimer(runtime, member.id)
+    const memberIds = new Set(members.map((member) => member.id))
+    for (const memberId of [...runtime.initialPeerIds]) {
+      if (memberIds.has(memberId)) continue
+      runtime.initialPeerIds.delete(memberId)
+      clearPeerConnectionTimer(runtime, memberId)
+    }
+    for (const memberId of runtime.initialPeerIds) armPeerConnectionTimer(runtime, memberId)
+    completeInitialConnectionIfReady(runtime)
   }
 
   const registerPeerFrameViolation = (runtime: SessionRuntime, sourceMemberId: string): void => {
@@ -769,6 +794,10 @@ export default function App() {
       peerViolationWindows: new Map(),
       peerDataQueues: new Map(),
       peerConnectionTimers: new Map(),
+      initialPeerIds: new Set(initialRoom.members
+        .map((member) => member.id)
+        .filter((memberId) => memberId !== initialRoom.memberId)),
+      initialConnectionComplete: false,
       decryptors: new Map(),
       attachmentMetadata: new Map(),
       attachmentReservations: new Map(),
@@ -784,7 +813,6 @@ export default function App() {
     updateRoom(initialRoom)
     mesh.syncMembers(initialRoom.members)
     armRoomConnectionTimers(runtime, initialRoom.members)
-    setTransportReady(runtime.peerConnectionTimers.size === 0)
     scheduleTurnRefresh(runtime, turnCredentials)
     return initialRoom
   }
@@ -799,7 +827,6 @@ export default function App() {
       updateRoom(next)
       runtime.mesh.syncMembers(next.members)
       armRoomConnectionTimers(runtime, next.members)
-      setTransportReady(runtime.peerConnectionTimers.size === 0)
       return
     }
     if (frame.type === 'room.member.joined') {
@@ -811,8 +838,9 @@ export default function App() {
       return
     }
     if (frame.type === 'room.member.left') {
-      runtime.mesh.removePeer(frame.payload.memberId)
+      runtime.initialPeerIds.delete(frame.payload.memberId)
       clearPeerConnectionTimer(runtime, frame.payload.memberId)
+      runtime.mesh.removePeer(frame.payload.memberId)
       runtime.peerRateWindows.delete(frame.payload.memberId)
       runtime.peerViolationWindows.delete(frame.payload.memberId)
       runtime.peerDataQueues.delete(frame.payload.memberId)

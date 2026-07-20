@@ -14,7 +14,14 @@ import {
   TextItalic,
   X,
 } from '@phosphor-icons/react'
-import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent, type ReactNode } from 'react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type PointerEvent,
+  type ReactNode,
+} from 'react'
 import type { RichTextDocument } from '../models'
 import type { Preferences } from '../preferences'
 
@@ -34,6 +41,21 @@ interface ToolbarButtonProps {
   expanded?: boolean
   children: ReactNode
   onActivate: () => void
+}
+
+function filesFromClipboard(clipboard: DataTransfer): File[] {
+  const itemFiles = [...clipboard.items]
+    .filter((item) => item.kind === 'file')
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file !== null)
+  const clipboardFiles = itemFiles.length > 0 ? itemFiles : [...clipboard.files]
+  const timestamp = Date.now()
+  return clipboardFiles.map((file, index) => file.name
+    ? file
+    : new File([file], `pasted-file-${timestamp}-${index + 1}`, {
+        type: file.type,
+        lastModified: file.lastModified,
+      }))
 }
 
 function ToolbarButton({ label, active, disabled, expanded, children, onActivate }: ToolbarButtonProps) {
@@ -97,6 +119,14 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
         if (!shouldSend) return false
         event.preventDefault()
         void submit()
+        return true
+      },
+      handlePaste: (_view, event) => {
+        if (disabled || !event.clipboardData) return false
+        const files = filesFromClipboard(event.clipboardData)
+        if (files.length === 0) return false
+        event.preventDefault()
+        void onFiles(files)
         return true
       },
     },

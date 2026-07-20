@@ -113,12 +113,13 @@ button { color: inherit; }
   border: 0 !important;
 }
 
-.app-shell { min-height: 100dvh; background: var(--page); }
+.app-shell { display: flex; height: 100dvh; overflow: hidden; flex-direction: column; background: var(--page); }
 
 .topbar {
   position: sticky;
   z-index: 20;
   top: 0;
+  flex: 0 0 auto;
   height: 60px;
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--surface) 94%, transparent);
@@ -217,10 +218,10 @@ button { color: inherit; }
 .more-popover .destructive { color: var(--red); }
 .more-popover .destructive:hover { background: var(--red-soft); }
 
-.chat-main { display: flex; width: min(100%, var(--content-width)); min-height: calc(100dvh - 60px); margin: 0 auto; padding: 28px var(--content-gutter) 18px; flex-direction: column; }
+.chat-main { display: flex; width: min(100%, var(--content-width)); min-height: 0; flex: 1; margin: 0 auto; padding: 28px var(--content-gutter) 18px; flex-direction: column; }
 .encryption-notice { display: flex; justify-content: center; align-items: center; gap: 7px; color: var(--text-tertiary); font-size: 11px; text-align: center; }
 .encryption-notice svg { width: 15px; height: 15px; color: var(--green); }
-.message-list { display: flex; flex: 1; flex-direction: column; gap: 21px; padding: 24px 0 28px; }
+.message-list { display: flex; min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; flex-direction: column; gap: 21px; padding: 24px 0 28px; }
 .empty-state { margin: auto; padding: 48px 20px; color: var(--text-tertiary); text-align: center; }
 .message { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 11px; }
 .message-body { min-width: 0; }
@@ -270,7 +271,7 @@ button { color: inherit; }
 .progress-track::-moz-progress-bar { background: var(--blue); }
 .attachment-error { color: var(--red); }
 
-.composer-region { position: sticky; z-index: 12; bottom: 0; padding-top: 6px; background: var(--page); }
+.composer-region { position: relative; z-index: 12; flex: 0 0 auto; padding-top: 6px; background: var(--page); }
 .room-error { margin-bottom: 10px; padding: 9px 12px; border: 1px solid color-mix(in srgb, var(--red) 35%, var(--border)); border-radius: var(--radius-sm); background: var(--red-soft); color: var(--red); font-size: 12px; }
 .connection-status { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-soft); color: var(--text-secondary); font-size: 12px; }
 .connection-status svg { width: 17px; height: 17px; flex: 0 0 auto; color: var(--blue); animation: spin 900ms linear infinite; }
@@ -383,7 +384,7 @@ button { color: inherit; }
   .top-action > span:not(.secure-dot) { display: none; }
   .top-icon { width: 36px; height: 36px; }
   .popover { position: fixed; top: 62px; right: 10px; left: 10px; width: auto; max-height: calc(100dvh - 76px); }
-  .chat-main { min-height: calc(100dvh - 54px); padding-top: 18px; padding-bottom: 10px; }
+  .chat-main { padding-top: 18px; padding-bottom: 10px; }
   .message-list { gap: 18px; padding-top: 20px; }
   .message { grid-template-columns: 27px minmax(0, 1fr); gap: 9px; }
   .member-avatar { width: 27px; height: 27px; }

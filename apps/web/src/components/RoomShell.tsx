@@ -1,5 +1,5 @@
 import { LockKey, SpinnerGap } from '@phosphor-icons/react'
-import { useEffect, useRef } from 'react'
+import { useLayoutEffect, useRef } from 'react'
 import { t } from '../i18n'
 import type { ActiveRoom, ChatMessage, RichTextDocument } from '../models'
 import type { Preferences } from '../preferences'
@@ -30,21 +30,31 @@ function formatTime(timestamp: number, locale: string): string {
 
 export function RoomShell(props: RoomShellProps) {
   const { room, messages, preferences } = props
-  const end = useRef<HTMLDivElement>(null)
+  const messageList = useRef<HTMLElement>(null)
+  const nearBottom = useRef(true)
   const previousLastMessageId = useRef<string | undefined>(undefined)
   const lastMessage = messages.at(-1)
   const lastMessageId = lastMessage?.id
   const lastMessageSenderId = lastMessage?.senderId
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!lastMessageId || previousLastMessageId.current === lastMessageId) return
     previousLastMessageId.current = lastMessageId
-    if (lastMessageSenderId !== room.memberId) return
+    if (lastMessageSenderId !== room.memberId && !nearBottom.current) return
     const frame = window.requestAnimationFrame(() => {
-      end.current?.scrollIntoView({ block: 'end', behavior: 'smooth' })
+      const list = messageList.current
+      if (!list) return
+      nearBottom.current = true
+      list.scrollTo({ top: list.scrollHeight, behavior: 'auto' })
     })
     return () => window.cancelAnimationFrame(frame)
   }, [lastMessageId, lastMessageSenderId, room.memberId])
+
+  const trackScrollPosition = (): void => {
+    const list = messageList.current
+    if (!list) return
+    nearBottom.current = list.scrollHeight - list.scrollTop - list.clientHeight <= 80
+  }
 
   return (
     <div className={`app-shell density-${preferences.density}`}>
@@ -57,7 +67,7 @@ export function RoomShell(props: RoomShellProps) {
       />
       <main className="chat-main">
         <div className="encryption-notice"><LockKey weight="fill" /><span>{t(preferences.locale, 'encryptedNotice')}</span></div>
-        <section className="message-list" aria-live="polite" aria-label="聊天消息">
+        <section ref={messageList} className="message-list" aria-live="polite" aria-label="聊天消息" onScroll={trackScrollPosition}>
           {messages.length === 0 ? <div className="empty-state">{t(preferences.locale, 'noMessages')}</div> : null}
           {messages.map((message) => {
             const links = extractLinks(message.document)
@@ -76,7 +86,6 @@ export function RoomShell(props: RoomShellProps) {
               </article>
             )
           })}
-          <div ref={end} />
         </section>
         <div className="composer-region">
           {props.error ? <div className="room-error" role="alert">{props.error}</div> : null}
