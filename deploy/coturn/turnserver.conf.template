@@ -1,0 +1,48 @@
+listening-port=3478
+listening-ip=0.0.0.0
+
+fingerprint
+use-auth-secret
+stale-nonce=600
+
+# This database is never persisted. REST credentials remain the only enabled
+# authentication mechanism, but coturn still expects a writable runtime path.
+userdb=/var/lib/coturn/turndb
+pidfile=/tmp/turnserver.pid
+
+no-cli
+no-auth-pings
+no-dynamic-ip-list
+no-dynamic-realms
+no-software-attribute
+no-rfc5780
+no-loopback-peers
+no-multicast-peers
+no-tcp-relay
+
+# Prevent authenticated TURN clients from using the relay to probe common
+# private, link-local, benchmark, documentation, or reserved IPv4 networks.
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.0.0.0-192.0.0.255
+denied-peer-ip=192.0.2.0-192.0.2.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=198.18.0.0-198.19.255.255
+denied-peer-ip=198.51.100.0-198.51.100.255
+denied-peer-ip=203.0.113.0-203.0.113.255
+denied-peer-ip=224.0.0.0-255.255.255.255
+
+user-quota=32
+total-quota=256
+max-allocate-lifetime=600
+channel-lifetime=600
+permission-lifetime=300
+
+# Never emit connection metadata, source IPs, usernames, or secrets to logs.
+no-stdout-log
+log-file=/dev/null
+simple-log

@@ -1,0 +1,123 @@
+name: veilink
+
+services:
+  app:
+    image: ${VEILINK_IMAGE:-veilink:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    logging:
+      driver: "none"
+    init: true
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 512m
+    memswap_limit: 512m
+    mem_swappiness: 0
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+      nofile:
+        soft: 4096
+        hard: 4096
+    stop_grace_period: 10s
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1700,uid=1000,gid=1000
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      WEB_DIST_DIR: /app/apps/web/dist
+      TLS_CERT_FILE: ${TLS_CERT_FILE:-}
+      TLS_KEY_FILE: ${TLS_KEY_FILE:-}
+      APP_ORIGIN: ${APP_ORIGIN:?Set APP_ORIGIN to the exact public HTTPS origin}
+      TRUST_PROXY_CIDRS: ${TRUST_PROXY_CIDRS:?Set explicit reverse-proxy CIDRs}
+      ROOM_TTL_SECONDS: ${ROOM_TTL_SECONDS:-86400}
+      STUN_URLS: ${STUN_URLS:?Set the public STUN URL}
+      TURN_URLS: ${TURN_URLS:?Set the public TURN URLs}
+      TURN_REALM: ${TURN_REALM:-veilink}
+      TURN_REST_SECRET: ${TURN_REST_SECRET:?Generate a shared TURN REST secret}
+      TURN_CREDENTIAL_TTL_SECONDS: ${TURN_CREDENTIAL_TTL_SECONDS:-600}
+      MAX_CONNECTIONS: ${MAX_CONNECTIONS:-2048}
+      MAX_CONNECTIONS_PER_IP: ${MAX_CONNECTIONS_PER_IP:-64}
+      MAX_ROOMS_PER_IP: ${MAX_ROOMS_PER_IP:-32}
+      ROOM_CREATE_ATTEMPTS_PER_MINUTE: ${ROOM_CREATE_ATTEMPTS_PER_MINUTE:-20}
+    ports:
+      - "${APP_BIND_IP:-127.0.0.1}:${APP_PORT:-3000}:3000/tcp"
+    depends_on:
+      turn:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "const s=require('node:net').connect(3000,'127.0.0.1');s.setTimeout(3000);s.on('connect',()=>{s.end();process.exit(0)});s.on('timeout',()=>process.exit(1));s.on('error',()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - veilink
+    deploy:
+      replicas: 1
+
+  turn:
+    image: ${VEILINK_TURN_IMAGE:-veilink-turn:local}
+    build:
+      context: .
+      dockerfile: deploy/coturn/Dockerfile
+    restart: unless-stopped
+    logging:
+      driver: "none"
+    user: "65534:65534"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    memswap_limit: 256m
+    mem_swappiness: 0
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+      nofile:
+        soft: 65536
+        hard: 65536
+    stop_grace_period: 10s
+    environment:
+      TURN_REALM: ${TURN_REALM:-veilink}
+      TURN_REST_SECRET: ${TURN_REST_SECRET:?Generate a shared TURN REST secret}
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:?Set the public TURN IPv4 address}
+      TURN_PRIVATE_IP: ${TURN_PRIVATE_IP:-}
+      TURN_MIN_PORT: ${TURN_MIN_PORT:-49160}
+      TURN_MAX_PORT: ${TURN_MAX_PORT:-49200}
+      TURN_TLS_ENABLED: "false"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1700,uid=65534,gid=65534
+      - /var/lib/coturn:rw,noexec,nosuid,nodev,size=16m,mode=1700,uid=65534,gid=65534
+    ports:
+      - "${TURN_BIND_IP:-0.0.0.0}:3478:3478/tcp"
+      - "${TURN_BIND_IP:-0.0.0.0}:3478:3478/udp"
+      - "${TURN_BIND_IP:-0.0.0.0}:${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}:${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}/udp"
+    networks:
+      - veilink
+
+networks:
+  veilink:
+    name: veilink-internal
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${VEILINK_SUBNET:-172.30.0.0/24}
+          gateway: ${VEILINK_GATEWAY:-172.30.0.1}

@@ -1,0 +1,1216 @@
+import { useEffect, useRef, useState } from 'react'
+import {
+  AttachmentMetadataSchema,
+  ChatPayloadSchema,
+  EncryptedChatFrameSchema,
+  EncryptedFileChunkSchema,
+  IdentityPublicKeySchema,
+  NicknameSchema,
+  RoomIdSchema,
+  buildInvitePath,
+  generateLinkSecret,
+  generatePin,
+  generateRoomId,
+  normalizeFileName,
+  type AttachmentMetadata,
+  type ChatPayload,
+  type EncryptedFileChunk,
+  type PublicMember,
+  type RoomSnapshot,
+  type ServerSignalEnvelope,
+  type TurnCredentials,
+} from '@veilink/protocol'
+import { CreateRoomView } from './components/CreateRoomView'
+import { EntryShell } from './components/EntryShell'
+import { JoinRoomView } from './components/JoinRoomView'
+import { P2PConsentView } from './components/P2PConsentView'
+import { RoomCreatedView } from './components/RoomCreatedView'
+import { RoomShell } from './components/RoomShell'
+import { deriveRoomKeys } from './crypto/derive'
+import { FileDecryptor, encryptFile, hashFile, type EncryptedFileChunk as LocalEncryptedFileChunk } from './crypto/files'
+import {
+  acceptReplayCounter,
+  createSessionIdentity,
+  decryptChatPayload,
+  destroyIdentity,
+  encryptChatPayload,
+} from './crypto/messages'
+import type { DerivedKeys, SessionIdentity } from './crypto/types'
+import { usePreferences } from './hooks/usePreferences'
+import { t } from './i18n'
+import { bytesToBase64Url, randomId } from './lib/encoding'
+import type { ActiveRoom, AttachmentView, ChatMessage, Member, RichTextDocument, RoomMode } from './models'
+import { validateMedia } from './mediaValidation'
+import { PeerMesh, type IceCredentials, type PeerSignalPayload } from './transport/PeerMesh'
+import { SignalClient, type SessionConfirmation } from './transport/SignalClient'
+
+interface PublicConfig {
+  protocolVersion: 1
+  limits: { maxMembers: number; maxRoomTtlMs: number; roomTtlMs: number; maxFileSizeMb: number }
+  heartbeatIntervalMs: number
+  disconnectGraceMs: number
+  modeSwitchTimeoutMs: number
+  ice: { stunUrls: string[]; turnUrls: string[]; turnAvailable: boolean }
+}
+
+type Stage = 'create' | 'join' | 'created' | 'p2p-consent' | 'room'
+
+const MAX_DATA_FRAME_BYTES = 128 * 1024
+const MAX_MESSAGES_IN_MEMORY = 500
+const MAX_REPLAY_SESSIONS_PER_PEER = 4
+const MAX_SEEN_ATTACHMENTS_PER_PEER = 64
+const MAX_CONCURRENT_INCOMING_FILES = 4
+const MAX_RETAINED_ATTACHMENT_BYTES = 512 * 1024 * 1024
+const MAX_PEER_FRAMES_PER_SECOND = 256
+const MAX_PEER_BYTES_PER_SECOND = 16 * 1024 * 1024
+const MAX_PEER_FRAME_VIOLATIONS = 3
+const PEER_FRAME_VIOLATION_WINDOW_MS = 10_000
+const INCOMING_TRANSFER_IDLE_TIMEOUT_MS = 2 * 60_000
+
+interface PeerRateWindow {
+  startedAt: number
+  frames: number
+  bytes: number
+}
+
+interface PeerViolationWindow {
+  startedAt: number
+  violations: number
+}
+
+interface SessionRuntime {
+  signal: SignalClient
+  identity: SessionIdentity
+  mesh: PeerMesh
+  config: PublicConfig
+  keys: DerivedKeys
+  linkSecret: string
+  generation: number
+  replayCounters: Map<string, number>
+  peerRateWindows: Map<string, PeerRateWindow>
+  peerViolationWindows: Map<string, PeerViolationWindow>
+  peerDataQueues: Map<string, Promise<void>>
+  peerConnectionTimers: Map<string, number>
+  decryptors: Map<string, FileDecryptor>
+  attachmentMetadata: Map<string, AttachmentMetadata>
+  attachmentReservations: Map<string, number>
+  incomingTransferTimers: Map<string, number>
+  incomingTransfers: Set<string>
+  retainedAttachmentBytes: number
+  seenAttachments: Set<string>
+  outboundTransfers: Map<string, AbortController>
+  transferEpoch: number
+  switchingMode: boolean
+  unsubscribe: () => void
+  pendingMode?: {
+    mode: RoomMode
+    version: number
+    turnCredentials?: TurnCredentials
+  }
+  turnRefreshTimer?: number
+}
+
+interface PendingJoin {
+  nickname: ReturnType<typeof NicknameSchema.parse>
+  identity: SessionIdentity
+  signal: SignalClient
+  keys: DerivedKeys
+  config: PublicConfig
+  challenge: Awaited<ReturnType<SignalClient['beginJoin']>>
+}
+
+function routeRoomId(): string | undefined {
+  const match = /^\/room\/([A-Za-z0-9_-]{22})\/?$/u.exec(window.location.pathname)
+  if (!match?.[1]) return undefined
+  const parsed = RoomIdSchema.safeParse(match[1])
+  return parsed.success ? parsed.data : undefined
+}
+
+function memberFromWire(member: PublicMember): Member {
+  return {
+    id: member.memberId,
+    nickname: member.nickname,
+    identityPublicKey: member.identityPublicKey,
+    joinedAt: member.joinedAt,
+    isOwner: member.isOwner,
+    ...(member.publicIp ? { publicIp: member.publicIp } : {}),
+  }
+}
+
+function activeRoomFromSnapshot(
+  snapshot: RoomSnapshot,
+  selfMemberId: string,
+  keys: DerivedKeys,
+  linkSecret: string,
+): ActiveRoom {
+  const expiresAt = Date.now() + Math.max(0, snapshot.expiresAt - snapshot.serverNow)
+  return {
+    roomId: snapshot.roomId,
+    memberId: selfMemberId,
+    ownerId: snapshot.ownerId,
+    mode: snapshot.mode,
+    modeVersion: snapshot.modeVersion,
+    expiresAt,
+    linkSecret,
+    fingerprint: keys.fingerprint,
+    keys,
+    members: snapshot.members.map(memberFromWire),
+  }
+}
+
+async function loadPublicConfig(): Promise<PublicConfig> {
+  const response = await fetch('/api/config', { cache: 'no-store', credentials: 'omit', headers: { Accept: 'application/json' } })
+  if (!response.ok) throw new Error('无法读取服务器配置')
+  const value = await response.json() as PublicConfig
+  if (value.protocolVersion !== 1 || !Array.isArray(value.ice?.stunUrls) || !Array.isArray(value.ice?.turnUrls)) {
+    throw new Error('服务器协议版本不受支持')
+  }
+  return value
+}
+
+function attachmentDocument(fileName: string): RichTextDocument {
+  return { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: fileName }] }] }
+}
+
+function previewKind(mime: string, previewable: boolean): AttachmentMetadata['previewKind'] {
+  if (!previewable) return 'download'
+  if (mime.startsWith('image/') && mime !== 'image/svg+xml') return 'image'
+  if (mime.startsWith('audio/')) return 'audio'
+  if (mime.startsWith('video/')) return 'video'
+  if (mime === 'application/pdf') return 'pdf'
+  return 'download'
+}
+
+function turnIce(credentials: TurnCredentials): IceCredentials {
+  return { urls: credentials.urls, username: credentials.username, credential: credentials.credential }
+}
+
+function wipeKeys(keys: DerivedKeys): void {
+  keys.admissionKey.fill(0)
+  keys.messageKey.fill(0)
+  keys.fileKey.fill(0)
+  keys.fingerprintKey.fill(0)
+}
+
+function disposePendingJoin(pending: PendingJoin): void {
+  pending.signal.close()
+  destroyIdentity(pending.identity)
+  wipeKeys(pending.keys)
+}
+
+function releaseAttachment(runtime: SessionRuntime, viewId: string): void {
+  const timer = runtime.incomingTransferTimers.get(viewId)
+  if (timer !== undefined) window.clearTimeout(timer)
+  runtime.incomingTransferTimers.delete(viewId)
+  const decryptor = runtime.decryptors.get(viewId)
+  decryptor?.destroy()
+  runtime.decryptors.delete(viewId)
+  runtime.attachmentMetadata.delete(viewId)
+  runtime.incomingTransfers.delete(viewId)
+  const reserved = runtime.attachmentReservations.get(viewId)
+  if (reserved !== undefined) {
+    runtime.retainedAttachmentBytes = Math.max(0, runtime.retainedAttachmentBytes - reserved)
+    runtime.attachmentReservations.delete(viewId)
+  }
+}
+
+function cancelTransfers(runtime: SessionRuntime): void {
+  runtime.transferEpoch += 1
+  for (const controller of runtime.outboundTransfers.values()) controller.abort()
+  runtime.outboundTransfers.clear()
+  for (const viewId of [...runtime.decryptors.keys()]) releaseAttachment(runtime, viewId)
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+function attachmentViewId(senderId: string, attachmentId: string): string {
+  return `${senderId}:${attachmentId}`
+}
+
+function boundedUtf8ByteLength(value: string, stopAfter: number): number {
+  let bytes = 0
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index)
+    if (codeUnit < 0x80) bytes += 1
+    else if (codeUnit < 0x800) bytes += 2
+    else if (codeUnit >= 0xd800 && codeUnit <= 0xdbff && index + 1 < value.length) {
+      const nextCodeUnit = value.charCodeAt(index + 1)
+      if (nextCodeUnit >= 0xdc00 && nextCodeUnit <= 0xdfff) {
+        bytes += 4
+        index += 1
+      } else {
+        bytes += 3
+      }
+    } else {
+      bytes += 3
+    }
+    if (bytes > stopAfter) return bytes
+  }
+  return bytes
+}
+
+function countKeysForPeer(values: Iterable<string>, memberId: string): number {
+  const prefix = `${memberId}:`
+  let count = 0
+  for (const key of values) {
+    if (key.startsWith(prefix)) count += 1
+  }
+  return count
+}
+
+function acceptPeerFrame(runtime: SessionRuntime, sourceMemberId: string, bytes: number): boolean {
+  const now = Date.now()
+  let window = runtime.peerRateWindows.get(sourceMemberId)
+  if (!window || now - window.startedAt >= 1_000) {
+    window = { startedAt: now, frames: 0, bytes: 0 }
+    runtime.peerRateWindows.set(sourceMemberId, window)
+  }
+  if (
+    window.frames + 1 > MAX_PEER_FRAMES_PER_SECOND ||
+    window.bytes + bytes > MAX_PEER_BYTES_PER_SECOND
+  ) {
+    return false
+  }
+  window.frames += 1
+  window.bytes += bytes
+  return true
+}
+
+export default function App() {
+  const [preferences, setPreferences] = usePreferences()
+  const preferencesRef = useRef(preferences)
+  const initialRoomId = useRef(routeRoomId())
+  const [linkSecret, setLinkSecret] = useState<string | undefined>(() => {
+    const secret = window.__VEILINK_BOOTSTRAP_SECRET__
+    delete window.__VEILINK_BOOTSTRAP_SECRET__
+    return secret
+  })
+  const [stage, setStage] = useState<Stage>(initialRoomId.current ? 'join' : 'create')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string>()
+  const [room, setRoom] = useState<ActiveRoom>()
+  const roomRef = useRef<ActiveRoom | undefined>(undefined)
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [transportReady, setTransportReady] = useState(false)
+  const messagesRef = useRef<ChatMessage[]>([])
+  const runtimeRef = useRef<SessionRuntime | undefined>(undefined)
+  const pendingJoinRef = useRef<PendingJoin | undefined>(undefined)
+  const stopRuntimeRef = useRef<(sendLeave: boolean) => void>(() => undefined)
+  const [createdDetails, setCreatedDetails] = useState<{ pin: string; invitation: string }>()
+
+  useEffect(() => {
+    preferencesRef.current = preferences
+  }, [preferences])
+
+  const updateRoom = (next: ActiveRoom | ((current: ActiveRoom) => ActiveRoom)): void => {
+    const resolved = typeof next === 'function'
+      ? roomRef.current ? next(roomRef.current) : undefined
+      : next
+    if (!resolved) return
+    roomRef.current = resolved
+    setRoom(resolved)
+  }
+
+  const updateMessages = (updater: (current: ChatMessage[]) => ChatMessage[]): void => {
+    let next = updater(messagesRef.current)
+    if (next.length > MAX_MESSAGES_IN_MEMORY) {
+      const removed = next.slice(0, next.length - MAX_MESSAGES_IN_MEMORY)
+      const runtime = runtimeRef.current
+      for (const message of removed) {
+        for (const attachment of message.attachments) {
+          if (attachment.objectUrl) URL.revokeObjectURL(attachment.objectUrl)
+          if (runtime) releaseAttachment(runtime, attachment.id)
+        }
+      }
+      next = next.slice(-MAX_MESSAGES_IN_MEMORY)
+    }
+    messagesRef.current = next
+    setMessages(next)
+  }
+
+  const updateAttachment = (attachmentId: string, patchValue: Partial<AttachmentView>): void => {
+    updateMessages((current) => current.map((message) => ({
+      ...message,
+      attachments: message.attachments.map((attachment) => attachment.id === attachmentId ? { ...attachment, ...patchValue } : attachment),
+    })))
+  }
+
+  const clearPeerConnectionTimer = (runtime: SessionRuntime, memberId: string): void => {
+    const timer = runtime.peerConnectionTimers.get(memberId)
+    if (timer !== undefined) window.clearTimeout(timer)
+    runtime.peerConnectionTimers.delete(memberId)
+    if (runtime.peerConnectionTimers.size === 0 && !runtime.switchingMode && runtimeRef.current === runtime) {
+      setTransportReady(true)
+    }
+  }
+
+  const clearPeerConnectionTimers = (runtime: SessionRuntime): void => {
+    for (const timer of runtime.peerConnectionTimers.values()) window.clearTimeout(timer)
+    runtime.peerConnectionTimers.clear()
+  }
+
+  const armPeerConnectionTimer = (runtime: SessionRuntime, memberId: string): void => {
+    if (
+      runtime.switchingMode ||
+      runtimeRef.current !== runtime ||
+      !roomRef.current?.members.some((member) => member.id === memberId) ||
+      memberId === roomRef.current?.memberId ||
+      runtime.mesh.connectedMemberIds().includes(memberId) ||
+      runtime.peerConnectionTimers.has(memberId)
+    ) return
+    setTransportReady(false)
+    const timer = window.setTimeout(() => {
+      runtime.peerConnectionTimers.delete(memberId)
+      if (
+        runtimeRef.current !== runtime ||
+        runtime.switchingMode ||
+        !roomRef.current?.members.some((member) => member.id === memberId) ||
+        runtime.mesh.connectedMemberIds().includes(memberId)
+      ) return
+      setError('30 秒内未能建立统一传输链路，当前成员已自动退出。')
+      stopRuntime(true)
+      window.history.replaceState(null, '', '/')
+      initialRoomId.current = undefined
+      setStage('create')
+    }, runtime.config.modeSwitchTimeoutMs)
+    runtime.peerConnectionTimers.set(memberId, timer)
+  }
+
+  const armRoomConnectionTimers = (runtime: SessionRuntime, members: Member[]): void => {
+    for (const member of members) armPeerConnectionTimer(runtime, member.id)
+  }
+
+  const registerPeerFrameViolation = (runtime: SessionRuntime, sourceMemberId: string): void => {
+    const now = Date.now()
+    let violationWindow = runtime.peerViolationWindows.get(sourceMemberId)
+    if (!violationWindow || now - violationWindow.startedAt >= PEER_FRAME_VIOLATION_WINDOW_MS) {
+      violationWindow = { startedAt: now, violations: 0 }
+      runtime.peerViolationWindows.set(sourceMemberId, violationWindow)
+    }
+    violationWindow.violations += 1
+    if (violationWindow.violations < MAX_PEER_FRAME_VIOLATIONS || runtimeRef.current !== runtime) return
+    setError('检测到成员持续发送无效或超限数据，已为保护本机内存自动退出。')
+    stopRuntime(true)
+    window.history.replaceState(null, '', '/')
+    initialRoomId.current = undefined
+    setStage('create')
+  }
+
+  const armIncomingTransferTimer = (runtime: SessionRuntime, viewId: string): void => {
+    const currentTimer = runtime.incomingTransferTimers.get(viewId)
+    if (currentTimer !== undefined) window.clearTimeout(currentTimer)
+    const timer = window.setTimeout(() => {
+      if (runtimeRef.current !== runtime || !runtime.incomingTransfers.has(viewId)) return
+      releaseAttachment(runtime, viewId)
+      updateAttachment(viewId, { status: 'cancelled', progress: 0 })
+    }, INCOMING_TRANSFER_IDLE_TIMEOUT_MS)
+    runtime.incomingTransferTimers.set(viewId, timer)
+  }
+
+  const stopRuntime = (sendLeave: boolean): void => {
+    const runtime = runtimeRef.current
+    if (runtime) {
+      runtime.switchingMode = true
+      runtime.unsubscribe()
+      clearPeerConnectionTimers(runtime)
+      runtime.mesh.destroy()
+      cancelTransfers(runtime)
+      if (runtime.turnRefreshTimer !== undefined) window.clearTimeout(runtime.turnRefreshTimer)
+      if (sendLeave) runtime.signal.leave()
+      else runtime.signal.close()
+      destroyIdentity(runtime.identity)
+      wipeKeys(runtime.keys)
+    }
+    const pending = pendingJoinRef.current
+    if (pending) disposePendingJoin(pending)
+    pendingJoinRef.current = undefined
+    for (const message of messagesRef.current) {
+      for (const attachment of message.attachments) {
+        if (attachment.objectUrl) URL.revokeObjectURL(attachment.objectUrl)
+        if (runtime) releaseAttachment(runtime, attachment.id)
+      }
+    }
+    if (runtime) {
+      runtime.replayCounters.clear()
+      runtime.peerRateWindows.clear()
+      runtime.peerViolationWindows.clear()
+      runtime.peerDataQueues.clear()
+      runtime.attachmentMetadata.clear()
+      runtime.attachmentReservations.clear()
+      runtime.incomingTransferTimers.clear()
+      runtime.incomingTransfers.clear()
+      runtime.seenAttachments.clear()
+      runtime.retainedAttachmentBytes = 0
+    }
+    runtimeRef.current = undefined
+    setTransportReady(false)
+    messagesRef.current = []
+    setMessages([])
+    roomRef.current = undefined
+    setRoom(undefined)
+    setLinkSecret(undefined)
+    setCreatedDetails(undefined)
+  }
+  stopRuntimeRef.current = stopRuntime
+
+  useEffect(() => {
+    const pageHide = (): void => {
+      stopRuntimeRef.current(true)
+      initialRoomId.current = undefined
+      window.history.replaceState(null, '', '/')
+      setStage('create')
+    }
+    window.addEventListener('pagehide', pageHide)
+    return () => {
+      window.removeEventListener('pagehide', pageHide)
+      stopRuntimeRef.current(true)
+    }
+  }, [])
+
+  const scheduleTurnRefresh = (runtime: SessionRuntime, credentials: TurnCredentials): void => {
+    if (runtime.turnRefreshTimer !== undefined) window.clearTimeout(runtime.turnRefreshTimer)
+    const remaining = Math.max(0, credentials.expiresAt - Date.now())
+    const refreshLead = Math.min(15 * 60_000, Math.max(60_000, Math.floor(remaining / 3)))
+    const delay = Math.max(30_000, remaining - refreshLead)
+    runtime.turnRefreshTimer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const refreshed = await runtime.signal.requestTurnCredentials()
+          await runtime.mesh.refreshTurnCredentials(turnIce(refreshed))
+          scheduleTurnRefresh(runtime, refreshed)
+        } catch {
+          setError('TURN 临时凭据刷新失败，请重新进入房间。')
+        }
+      })()
+    }, delay)
+  }
+
+  const processData = async (sourceMemberId: string, raw: string | ArrayBuffer): Promise<void> => {
+    const runtime = runtimeRef.current
+    const currentRoom = roomRef.current
+    if (!runtime || !currentRoom) return
+    const sender = currentRoom.members.find((member) => member.id === sourceMemberId)
+    if (!sender) return
+    const byteLength = typeof raw === 'string'
+      ? boundedUtf8ByteLength(raw, MAX_PEER_BYTES_PER_SECOND)
+      : raw.byteLength
+    if (!acceptPeerFrame(runtime, sourceMemberId, byteLength)) {
+      registerPeerFrameViolation(runtime, sourceMemberId)
+      return
+    }
+    if (typeof raw !== 'string' || byteLength > MAX_DATA_FRAME_BYTES) {
+      registerPeerFrameViolation(runtime, sourceMemberId)
+      return
+    }
+    let value: unknown
+    try { value = JSON.parse(raw) as unknown } catch { return }
+
+    const chatFrame = EncryptedChatFrameSchema.safeParse(value)
+    if (chatFrame.success) {
+      const frame = chatFrame.data
+      if (frame.senderId !== sourceMemberId) return
+      const replayKey = `${frame.senderId}:${frame.sessionId}`
+      if (
+        !runtime.replayCounters.has(replayKey) &&
+        countKeysForPeer(runtime.replayCounters.keys(), frame.senderId) >= MAX_REPLAY_SESSIONS_PER_PEER
+      ) return
+      try {
+        const decrypted = await decryptChatPayload<unknown>(
+          frame,
+          runtime.keys.messageKey,
+          IdentityPublicKeySchema.parse(sender.identityPublicKey),
+        )
+        const payload = ChatPayloadSchema.parse(decrypted)
+        const replayCounters = acceptReplayCounter(
+          runtime.replayCounters,
+          frame.senderId,
+          frame.sessionId,
+          frame.counter,
+        )
+        if (!replayCounters) return
+        runtime.replayCounters = replayCounters
+        await processPayload(payload, sender, frame.sentAt, frame.messageId)
+      } catch {
+        return
+      }
+      return
+    }
+
+    const chunkFrame = EncryptedFileChunkSchema.safeParse(value)
+    if (!chunkFrame.success) return
+    const frame = chunkFrame.data
+    const viewId = attachmentViewId(sourceMemberId, frame.attachmentId)
+    const decryptor = runtime.decryptors.get(viewId)
+    const metadata = runtime.attachmentMetadata.get(viewId)
+    if (!decryptor || !metadata) return
+    try {
+      const blob = decryptor.push({
+        fileId: frame.attachmentId,
+        index: frame.chunkIndex,
+        ciphertext: frame.ciphertext,
+        final: frame.final,
+      })
+      armIncomingTransferTimer(runtime, viewId)
+      updateAttachment(viewId, {
+        status: frame.final ? 'receiving' : 'receiving',
+        progress: Math.min(1, ((frame.chunkIndex + 1) * metadata.chunkSize) / metadata.size),
+      })
+      if (blob) {
+        if (blob.size !== metadata.size) throw new Error('Received file length does not match the offer')
+        const bytes = new Uint8Array(await blob.slice(0, Math.min(blob.size, 8_192)).arrayBuffer())
+        let media: Awaited<ReturnType<typeof validateMedia>>
+        let safeBlob: Blob
+        try {
+          media = await validateMedia(bytes, metadata.mimeType)
+          safeBlob = blob.slice(0, blob.size, media.previewable ? media.mime : 'application/octet-stream')
+        } finally {
+          bytes.fill(0)
+        }
+        const objectUrl = URL.createObjectURL(safeBlob)
+        updateAttachment(viewId, { status: 'ready', progress: 1, mime: media.mime, previewable: media.previewable, objectUrl })
+        runtime.decryptors.delete(viewId)
+        runtime.attachmentMetadata.delete(viewId)
+        runtime.incomingTransfers.delete(viewId)
+        const transferTimer = runtime.incomingTransferTimers.get(viewId)
+        if (transferTimer !== undefined) window.clearTimeout(transferTimer)
+        runtime.incomingTransferTimers.delete(viewId)
+      }
+    } catch {
+      releaseAttachment(runtime, viewId)
+      updateAttachment(viewId, { status: 'rejected', progress: 0 })
+    }
+  }
+
+  const processPayload = async (payload: ChatPayload, sender: Member, sentAt: number, messageId: string): Promise<void> => {
+    const runtime = runtimeRef.current
+    if (!runtime) return
+    if (payload.type === 'rich-text') {
+      updateMessages((current) => [...current, {
+        id: `${sender.id}:${messageId}`,
+        senderId: sender.id,
+        senderName: sender.nickname,
+        sentAt,
+        document: payload.document as RichTextDocument,
+        attachments: [],
+      }])
+      return
+    }
+    if (payload.type === 'attachment-offer') {
+      const metadata = payload.attachment
+      const viewId = attachmentViewId(sender.id, metadata.attachmentId)
+      if (
+        runtime.seenAttachments.has(viewId) ||
+        countKeysForPeer(runtime.seenAttachments, sender.id) >= MAX_SEEN_ATTACHMENTS_PER_PEER
+      ) return
+      runtime.seenAttachments.add(viewId)
+      const maxBytes = preferencesRef.current.maxFileSizeMb * 1024 * 1024
+      const retainedLimit = Math.min(MAX_RETAINED_ATTACHMENT_BYTES, maxBytes * 4)
+      let accepted = metadata.size <= maxBytes &&
+        runtime.incomingTransfers.size < MAX_CONCURRENT_INCOMING_FILES &&
+        runtime.retainedAttachmentBytes + metadata.size <= retainedLimit
+      if (accepted) {
+        runtime.incomingTransfers.add(viewId)
+        runtime.attachmentReservations.set(viewId, metadata.size)
+        runtime.retainedAttachmentBytes += metadata.size
+        try {
+          const decryptor = await FileDecryptor.create(
+            metadata.attachmentId,
+            runtime.keys.fileKey,
+            metadata.secretstreamHeader,
+            {
+              digest: metadata.digest,
+              size: metadata.size,
+              chunkSize: metadata.chunkSize,
+              chunkCount: metadata.chunkCount,
+            },
+          )
+          if (runtimeRef.current !== runtime) {
+            decryptor.destroy()
+            releaseAttachment(runtime, viewId)
+            return
+          }
+          runtime.decryptors.set(viewId, decryptor)
+          runtime.attachmentMetadata.set(viewId, metadata)
+          armIncomingTransferTimer(runtime, viewId)
+        } catch {
+          accepted = false
+          releaseAttachment(runtime, viewId)
+        }
+      }
+      updateMessages((current) => [...current, {
+        id: `${sender.id}:${messageId}`,
+        senderId: sender.id,
+        senderName: sender.nickname,
+        sentAt,
+        document: attachmentDocument(metadata.fileName),
+        attachments: [{
+          id: viewId,
+          name: metadata.fileName,
+          mime: metadata.mimeType,
+          size: metadata.size,
+          status: accepted ? 'receiving' : 'rejected',
+          progress: 0,
+          previewable: false,
+        }],
+      }])
+      return
+    }
+    updateAttachment(attachmentViewId(sender.id, payload.attachmentId), {
+      status: payload.state === 'complete'
+        ? 'ready'
+        : payload.state === 'failed' || payload.state === 'declined'
+          ? 'rejected'
+          : payload.state === 'cancelled'
+            ? 'cancelled'
+            : 'receiving',
+      progress: 0,
+    })
+  }
+
+  const setupRuntime = async (
+    confirmation: SessionConfirmation,
+    signal: SignalClient,
+    identity: SessionIdentity,
+    keys: DerivedKeys,
+    secret: string,
+    config: PublicConfig,
+  ): Promise<ActiveRoom> => {
+    const initialRoom = activeRoomFromSnapshot(confirmation.snapshot, confirmation.selfMemberId, keys, secret)
+    let turnCredentials: TurnCredentials | undefined
+    if (initialRoom.mode === 'turn') {
+      if (!config.ice.turnAvailable) throw new Error('服务器未配置 TURN 中继')
+      turnCredentials = await signal.requestTurnCredentials()
+    }
+    const runtime = {} as SessionRuntime
+    const mesh = new PeerMesh({
+      localMemberId: initialRoom.memberId,
+      mode: initialRoom.mode,
+      stunUrls: config.ice.stunUrls,
+      ...(turnCredentials ? { turnCredentials: turnIce(turnCredentials) } : {}),
+      sendSignal: (targetMemberId, payload) => {
+        const active = roomRef.current
+        if (!active) return
+        if (payload.description) signal.sendRtcDescription(targetMemberId as never, active.modeVersion, runtime.generation, payload.description)
+        if (payload.candidate) signal.sendRtcCandidate(targetMemberId as never, active.modeVersion, runtime.generation, payload.candidate)
+      },
+      onData: (sourceMemberId, data) => {
+        const previous = runtime.peerDataQueues.get(sourceMemberId) ?? Promise.resolve()
+        const next = previous
+          .catch(() => undefined)
+          .then(() => processData(sourceMemberId, data))
+          .catch(() => undefined)
+        runtime.peerDataQueues.set(sourceMemberId, next)
+        void next.then(() => {
+          if (runtime.peerDataQueues.get(sourceMemberId) === next) runtime.peerDataQueues.delete(sourceMemberId)
+        })
+      },
+      onConnectionChange: (memberId, state) => {
+        if (state === 'failed') armPeerConnectionTimer(runtime, memberId)
+      },
+      onChannelChange: (memberId, state) => {
+        if (state === 'open') clearPeerConnectionTimer(runtime, memberId)
+        if (state === 'closed') armPeerConnectionTimer(runtime, memberId)
+      },
+    })
+    const unsubscribe = signal.subscribe((frame) => {
+      void handleServerFrame(frame).catch((caught: unknown) => {
+        setError(caught instanceof Error ? caught.message : '无法处理服务器状态更新')
+        if (frame.type === 'room.mode.pending' || frame.type === 'room.mode.changed' || frame.type === 'room.resumed' || frame.type === 'room.snapshot') {
+          stopRuntime(false)
+          window.history.replaceState(null, '', '/')
+          initialRoomId.current = undefined
+          setStage('create')
+        }
+      })
+    })
+    Object.assign(runtime, {
+      signal,
+      identity,
+      mesh,
+      config,
+      keys,
+      linkSecret: secret,
+      generation: initialRoom.modeVersion,
+      replayCounters: new Map(),
+      peerRateWindows: new Map(),
+      peerViolationWindows: new Map(),
+      peerDataQueues: new Map(),
+      peerConnectionTimers: new Map(),
+      decryptors: new Map(),
+      attachmentMetadata: new Map(),
+      attachmentReservations: new Map(),
+      incomingTransferTimers: new Map(),
+      incomingTransfers: new Set(),
+      retainedAttachmentBytes: 0,
+      seenAttachments: new Set(),
+      outboundTransfers: new Map(),
+      transferEpoch: 0,
+      switchingMode: false,
+      unsubscribe,
+    } satisfies SessionRuntime)
+    runtimeRef.current = runtime
+    updateRoom(initialRoom)
+    mesh.syncMembers(initialRoom.members)
+    armRoomConnectionTimers(runtime, initialRoom.members)
+    setTransportReady(runtime.peerConnectionTimers.size === 0)
+    if (turnCredentials) scheduleTurnRefresh(runtime, turnCredentials)
+    return initialRoom
+  }
+
+  const handleServerFrame = async (frame: ServerSignalEnvelope): Promise<void> => {
+    const runtime = runtimeRef.current
+    const current = roomRef.current
+    if (!runtime || !current || ('roomId' in frame && frame.roomId && frame.roomId !== current.roomId)) return
+    if (frame.type === 'room.snapshot' || frame.type === 'room.resumed') {
+      const snapshot = frame.type === 'room.snapshot' ? frame.payload : frame.payload.snapshot
+      const next = activeRoomFromSnapshot(snapshot, current.memberId, current.keys, current.linkSecret)
+      const requiresRebuild = snapshot.mode !== current.mode || snapshot.modeVersion !== current.modeVersion
+      if (requiresRebuild) {
+        runtime.switchingMode = true
+        setTransportReady(false)
+        clearPeerConnectionTimers(runtime)
+        cancelTransfers(runtime)
+        let credentials: TurnCredentials | undefined
+        if (snapshot.mode === 'turn') credentials = await runtime.signal.requestTurnCredentials()
+        await runtime.mesh.reconfigure(snapshot.mode, credentials ? turnIce(credentials) : undefined)
+        runtime.generation = snapshot.modeVersion
+        runtime.pendingMode = undefined
+        if (runtime.turnRefreshTimer !== undefined) window.clearTimeout(runtime.turnRefreshTimer)
+        runtime.turnRefreshTimer = undefined
+        if (credentials) scheduleTurnRefresh(runtime, credentials)
+      }
+      updateRoom(next)
+      runtime.mesh.syncMembers(next.members)
+      runtime.switchingMode = false
+      armRoomConnectionTimers(runtime, next.members)
+      setTransportReady(runtime.peerConnectionTimers.size === 0)
+      return
+    }
+    if (frame.type === 'room.member.joined') {
+      const member = memberFromWire(frame.payload.member)
+      updateRoom((value) => ({ ...value, members: [...value.members.filter((item) => item.id !== member.id), member] }))
+      const members = [...(roomRef.current?.members ?? [])]
+      runtime.mesh.syncMembers(members)
+      armPeerConnectionTimer(runtime, member.id)
+      return
+    }
+    if (frame.type === 'room.member.left') {
+      runtime.mesh.removePeer(frame.payload.memberId)
+      clearPeerConnectionTimer(runtime, frame.payload.memberId)
+      runtime.peerRateWindows.delete(frame.payload.memberId)
+      runtime.peerViolationWindows.delete(frame.payload.memberId)
+      runtime.peerDataQueues.delete(frame.payload.memberId)
+      for (const key of [...runtime.replayCounters.keys()]) {
+        if (key.startsWith(`${frame.payload.memberId}:`)) runtime.replayCounters.delete(key)
+      }
+      const activeAttachmentPrefix = `${frame.payload.memberId}:`
+      for (const viewId of [...runtime.seenAttachments]) {
+        if (viewId.startsWith(activeAttachmentPrefix)) runtime.seenAttachments.delete(viewId)
+      }
+      for (const viewId of [...runtime.decryptors.keys()]) {
+        if (viewId.startsWith(activeAttachmentPrefix)) releaseAttachment(runtime, viewId)
+      }
+      updateMessages((currentMessages) => currentMessages.map((message) => ({
+        ...message,
+        attachments: message.attachments.map((attachment) =>
+          attachment.id.startsWith(activeAttachmentPrefix) && attachment.status === 'receiving'
+            ? { ...attachment, status: 'cancelled' }
+            : attachment),
+      })))
+      updateRoom((value) => ({ ...value, members: value.members.filter((member) => member.id !== frame.payload.memberId) }))
+      return
+    }
+    if (frame.type === 'room.owner.changed') {
+      updateRoom((value) => ({
+        ...value,
+        ownerId: frame.payload.ownerId,
+        members: value.members.map((member) => ({ ...member, isOwner: member.id === frame.payload.ownerId })),
+      }))
+      return
+    }
+    if (frame.type === 'rtc.description' || frame.type === 'rtc.candidate') {
+      if (frame.payload.modeVersion !== current.modeVersion || frame.payload.generation !== runtime.generation) return
+      const payload: PeerSignalPayload = frame.type === 'rtc.description'
+        ? { description: frame.payload.description as RTCSessionDescriptionInit }
+        : { candidate: frame.payload.candidate as RTCIceCandidateInit }
+      await runtime.mesh.handleSignal(frame.payload.fromMemberId, payload)
+      return
+    }
+    if (frame.type === 'room.mode.pending') {
+      runtime.switchingMode = true
+      setTransportReady(false)
+      clearPeerConnectionTimers(runtime)
+      cancelTransfers(runtime)
+      updateMessages((currentMessages) => currentMessages.map((message) => ({
+        ...message,
+        attachments: message.attachments.map((attachment) => attachment.status === 'sending' || attachment.status === 'receiving' ? { ...attachment, status: 'cancelled' } : attachment),
+      })))
+      if (runtime.turnRefreshTimer !== undefined) window.clearTimeout(runtime.turnRefreshTimer)
+      runtime.turnRefreshTimer = undefined
+      try {
+        let credentials: TurnCredentials | undefined
+        if (frame.payload.mode === 'turn') credentials = await runtime.signal.requestTurnCredentials()
+        await runtime.mesh.reconfigure(frame.payload.mode, credentials ? turnIce(credentials) : undefined)
+        runtime.pendingMode = {
+          mode: frame.payload.mode,
+          version: frame.payload.version,
+          ...(credentials ? { turnCredentials: credentials } : {}),
+        }
+        runtime.signal.acknowledgeMode(frame.payload.version, 'ready')
+      } catch (caught) {
+        runtime.pendingMode = undefined
+        try {
+          runtime.signal.acknowledgeMode(
+            frame.payload.version,
+            'failed',
+            caught instanceof Error ? caught.message.slice(0, 160) : 'mode preparation failed',
+          )
+        } catch {
+          // The signaling socket may already have closed; local teardown still proceeds.
+        }
+        setError('无法安全切换传输模式，当前会话已退出。')
+        window.setTimeout(() => {
+          if (runtimeRef.current !== runtime) return
+          stopRuntime(false)
+          window.history.replaceState(null, '', '/')
+          initialRoomId.current = undefined
+          setStage('create')
+        }, 0)
+      }
+      return
+    }
+    if (frame.type === 'room.mode.changed') {
+      const prepared = runtime.pendingMode?.mode === frame.payload.mode && runtime.pendingMode.version === frame.payload.version
+        ? runtime.pendingMode
+        : undefined
+      let credentials = prepared?.turnCredentials
+      if (!prepared) {
+        if (frame.payload.mode === 'turn') credentials = await runtime.signal.requestTurnCredentials()
+        await runtime.mesh.reconfigure(frame.payload.mode, credentials ? turnIce(credentials) : undefined)
+      }
+      runtime.pendingMode = undefined
+      runtime.generation = frame.payload.version
+      updateRoom((value) => ({
+        ...value,
+        mode: frame.payload.mode,
+        modeVersion: frame.payload.version,
+        members: frame.payload.mode === 'turn'
+          ? value.members.map(({ id, nickname, identityPublicKey, joinedAt, isOwner }) => ({
+              id,
+              nickname,
+              identityPublicKey,
+              joinedAt,
+              isOwner,
+            }))
+          : value.members,
+      }))
+      runtime.mesh.syncMembers(roomRef.current?.members ?? [])
+      runtime.switchingMode = false
+      armRoomConnectionTimers(runtime, roomRef.current?.members ?? [])
+      setTransportReady(runtime.peerConnectionTimers.size === 0)
+      if (runtime.turnRefreshTimer !== undefined) window.clearTimeout(runtime.turnRefreshTimer)
+      runtime.turnRefreshTimer = undefined
+      if (credentials) scheduleTurnRefresh(runtime, credentials)
+      return
+    }
+    if (frame.type === 'room.ended') {
+      stopRuntime(false)
+      setError(`聊天室已结束：${frame.payload.reason}`)
+      window.history.replaceState(null, '', '/')
+      setStage('create')
+      return
+    }
+    if (frame.type === 'error') {
+      setError(frame.payload.message)
+      if (frame.payload.code === 'resume_rejected' || frame.payload.code === 'member_not_found') {
+        stopRuntime(false)
+        window.history.replaceState(null, '', '/')
+        initialRoomId.current = undefined
+        setStage('create')
+      }
+    }
+  }
+
+  const rememberNickname = (nickname: string): void => {
+    if (preferences.rememberNickname) setPreferences({ ...preferences, nickname })
+  }
+
+  const createRoom = async (rawNickname: string, mode: RoomMode): Promise<void> => {
+    setBusy(true)
+    setError(undefined)
+    let keys: DerivedKeys | undefined
+    let identity: SessionIdentity | undefined
+    let signal: SignalClient | undefined
+    try {
+      const nickname = NicknameSchema.parse(rawNickname)
+      const roomId = generateRoomId()
+      const secret = generateLinkSecret()
+      const pin = generatePin()
+      const config = await loadPublicConfig()
+      if (mode === 'turn' && !config.ice.turnAvailable) throw new Error('服务器尚未配置 TURN 中继，请选择 P2P 或完成部署配置。')
+      keys = await deriveRoomKeys(pin, roomId, secret)
+      identity = await createSessionIdentity()
+      signal = new SignalClient(roomId)
+      const confirmation = await signal.createRoom({
+        nickname,
+        mode,
+        admissionKey: keys.admissionKey,
+        identityPublicKey: IdentityPublicKeySchema.parse(bytesToBase64Url(identity.publicKey)),
+      })
+      await setupRuntime(confirmation, signal, identity, keys, secret, config)
+      keys = undefined
+      identity = undefined
+      signal = undefined
+      const path = buildInvitePath(roomId, secret)
+      const invitation = `${window.location.origin}${path}`
+      window.history.replaceState(null, '', `/room/${roomId}`)
+      initialRoomId.current = roomId
+      setLinkSecret(secret)
+      rememberNickname(nickname)
+      setCreatedDetails({ pin, invitation })
+      setStage('created')
+    } catch (caught) {
+      stopRuntime(false)
+      signal?.close()
+      if (identity) destroyIdentity(identity)
+      if (keys) wipeKeys(keys)
+      setError(caught instanceof Error ? caught.message : '创建聊天室失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const finishPendingJoin = async (): Promise<void> => {
+    const pending = pendingJoinRef.current
+    if (!pending) return
+    setBusy(true)
+    setError(undefined)
+    try {
+      const confirmation = await pending.signal.finishJoin({
+        nickname: pending.nickname,
+        identityPublicKey: IdentityPublicKeySchema.parse(bytesToBase64Url(pending.identity.publicKey)),
+        admissionKey: pending.keys.admissionKey,
+        challengeId: pending.challenge.challengeId,
+        challenge: pending.challenge.challenge,
+      })
+      await setupRuntime(confirmation, pending.signal, pending.identity, pending.keys, linkSecret!, pending.config)
+      rememberNickname(pending.nickname)
+      pendingJoinRef.current = undefined
+      setStage('room')
+    } catch (caught) {
+      if (runtimeRef.current?.identity === pending.identity) {
+        pendingJoinRef.current = undefined
+        stopRuntime(false)
+      } else {
+        disposePendingJoin(pending)
+        pendingJoinRef.current = undefined
+      }
+      setError(caught instanceof Error ? caught.message : '加入聊天室失败')
+      setStage('join')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const joinRoom = async (rawNickname: string, pin: string): Promise<void> => {
+    if (!initialRoomId.current || !linkSecret) return
+    setBusy(true)
+    setError(undefined)
+    let keys: DerivedKeys | undefined
+    let identity: SessionIdentity | undefined
+    let signal: SignalClient | undefined
+    try {
+      const nickname = NicknameSchema.parse(rawNickname)
+      const config = await loadPublicConfig()
+      keys = await deriveRoomKeys(pin, initialRoomId.current, linkSecret)
+      identity = await createSessionIdentity()
+      signal = new SignalClient(initialRoomId.current)
+      const challenge = await signal.beginJoin(nickname, IdentityPublicKeySchema.parse(bytesToBase64Url(identity.publicKey)))
+      pendingJoinRef.current = { nickname, identity, signal, keys, config, challenge }
+      keys = undefined
+      identity = undefined
+      signal = undefined
+      if (challenge.mode === 'p2p') setStage('p2p-consent')
+      else await finishPendingJoin()
+    } catch (caught) {
+      signal?.close()
+      if (identity) destroyIdentity(identity)
+      if (keys) wipeKeys(keys)
+      setError(caught instanceof Error ? caught.message : '加入聊天室失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const sendPayload = async (payload: ChatPayload): Promise<string> => {
+    const runtime = runtimeRef.current
+    const current = roomRef.current
+    if (!runtime || !current || runtime.switchingMode) throw new Error('传输模式切换中，请稍后再发送')
+    const validated = ChatPayloadSchema.parse(payload)
+    const frame = await encryptChatPayload(validated, current.memberId, runtime.identity, runtime.keys.messageKey)
+    await runtime.mesh.broadcast(JSON.stringify(frame))
+    return frame.messageId
+  }
+
+  const sendDocument = async (document: RichTextDocument): Promise<void> => {
+    const current = roomRef.current
+    if (!current) return
+    try {
+      setError(undefined)
+      const payload = ChatPayloadSchema.parse({ type: 'rich-text', document })
+      if (payload.type !== 'rich-text') throw new Error('Invalid rich-text payload')
+      const messageId = await sendPayload(payload)
+      const self = current.members.find((member) => member.id === current.memberId)
+      if (!self) return
+      updateMessages((items) => [...items, {
+        id: `${self.id}:${messageId}`,
+        senderId: self.id,
+        senderName: self.nickname,
+        sentAt: Date.now(),
+        document: payload.document as RichTextDocument,
+        attachments: [],
+      }])
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '消息发送失败')
+      throw caught
+    }
+  }
+
+  const sendFiles = async (files: File[]): Promise<void> => {
+    const runtime = runtimeRef.current
+    const current = roomRef.current
+    const self = current?.members.find((member) => member.id === current.memberId)
+    if (!runtime || !current || !self || runtime.switchingMode) return
+    const accepted = files.slice(0, 4)
+    const transferEpoch = runtime.transferEpoch
+    for (const file of accepted) {
+      if (runtimeRef.current !== runtime || runtime.switchingMode || runtime.transferEpoch !== transferEpoch) break
+      const maxBytes = preferences.maxFileSizeMb * 1024 * 1024
+      if (file.size < 1 || file.size > maxBytes) {
+        setError(`文件 ${file.name} 超出本地 ${preferences.maxFileSizeMb} MiB 上限`)
+        continue
+      }
+      const fileName = normalizeFileName(file.name)
+      const attachmentId = randomId(16)
+      const viewId = attachmentViewId(self.id, attachmentId)
+      const controller = new AbortController()
+      runtime.outboundTransfers.set(attachmentId, controller)
+      let metadata: AttachmentMetadata | undefined
+      let objectUrl: string | undefined
+      try {
+        const headerBytes = new Uint8Array(await file.slice(0, Math.min(file.size, 8192)).arrayBuffer())
+        let validatedMedia: Awaited<ReturnType<typeof validateMedia>>
+        try {
+          if (controller.signal.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
+          validatedMedia = await validateMedia(headerBytes, file.type || 'application/octet-stream')
+        } finally {
+          headerBytes.fill(0)
+        }
+        const digest = await hashFile(file, controller.signal)
+        if (runtimeRef.current !== runtime) controller.abort()
+        if (controller.signal.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
+        objectUrl = URL.createObjectURL(file)
+        await encryptFile(
+          file,
+          attachmentId,
+          runtime.keys.fileKey,
+          async (start) => {
+            metadata = AttachmentMetadataSchema.parse({
+              attachmentId,
+              fileName,
+              size: file.size,
+              mimeType: validatedMedia.mime,
+              digest,
+              previewKind: previewKind(validatedMedia.mime, validatedMedia.previewable),
+              chunkSize: 64 * 1024,
+              chunkCount: Math.ceil(file.size / (64 * 1024)),
+              secretstreamHeader: start.header,
+            })
+            if (controller.signal.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
+            const messageId = await sendPayload({ type: 'attachment-offer', attachment: metadata })
+            if (controller.signal.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
+            updateMessages((items) => [...items, {
+              id: `${self.id}:${messageId}`,
+              senderId: self.id,
+              senderName: self.nickname,
+              sentAt: Date.now(),
+              document: attachmentDocument(fileName),
+              attachments: [{ id: viewId, name: fileName, mime: metadata!.mimeType, size: file.size, status: 'sending', progress: 0, previewable: validatedMedia.previewable, objectUrl }],
+            }])
+          },
+          async (chunk: LocalEncryptedFileChunk) => {
+            if (controller.signal.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
+            const wire: EncryptedFileChunk = EncryptedFileChunkSchema.parse({
+              v: 1,
+              type: 'file-chunk',
+              attachmentId,
+              chunkIndex: chunk.index,
+              final: chunk.final,
+              ciphertext: chunk.ciphertext,
+            })
+            await runtime.mesh.broadcast(JSON.stringify(wire))
+            if (controller.signal.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
+            updateAttachment(viewId, { status: chunk.final ? 'ready' : 'sending', progress: Math.min(1, ((chunk.index + 1) * 64 * 1024) / file.size) })
+          },
+          controller.signal,
+        )
+      } catch (caught) {
+        if (objectUrl) URL.revokeObjectURL(objectUrl)
+        const cancelled = isAbortError(caught)
+        updateAttachment(viewId, { status: cancelled ? 'cancelled' : 'rejected', progress: 0, objectUrl: undefined })
+        if (!cancelled) setError(caught instanceof Error ? caught.message : `发送 ${fileName} 失败`)
+        if (cancelled) break
+      } finally {
+        if (runtime.outboundTransfers.get(attachmentId) === controller) {
+          runtime.outboundTransfers.delete(attachmentId)
+        }
+      }
+    }
+  }
+
+  const leaveRoom = (): void => {
+    stopRuntime(true)
+    setLinkSecret(undefined)
+    window.history.replaceState(null, '', '/')
+    initialRoomId.current = undefined
+    setStage('create')
+  }
+
+  const destroyRoom = async (): Promise<void> => {
+    const current = roomRef.current
+    const runtime = runtimeRef.current
+    if (!current || !runtime) return
+    const suffix = current.fingerprint.replaceAll(' ', '').slice(-4)
+    const confirmation = window.prompt(`输入密钥指纹末 4 位 ${suffix} 以销毁聊天室`)
+    if (confirmation?.toUpperCase() !== suffix) return
+    runtime.signal.destroyRoom()
+  }
+
+  const switchMode = async (mode: RoomMode): Promise<void> => {
+    const runtime = runtimeRef.current
+    const current = roomRef.current
+    if (!runtime || !current || mode === current.mode) return
+    if (mode === 'p2p' && !window.confirm(t(preferences.locale, 'directIpNotice'))) return
+    runtime.signal.requestMode(mode, current.modeVersion)
+  }
+
+  if (stage === 'room' && room) {
+    return <RoomShell room={room} messages={messages} preferences={preferences} connected={transportReady} error={error} onPreferences={setPreferences} onSend={sendDocument} onFiles={sendFiles} onSwitchMode={switchMode} onLeave={leaveRoom} onDestroy={destroyRoom} />
+  }
+
+  return (
+    <EntryShell preferences={preferences} onPreferences={setPreferences}>
+      {stage === 'create' ? <CreateRoomView preferences={preferences} busy={busy} error={error} onPreferences={setPreferences} onCreate={createRoom} /> : null}
+      {stage === 'join' ? <JoinRoomView preferences={preferences} hasLinkSecret={Boolean(linkSecret)} busy={busy} error={error} onJoin={joinRoom} /> : null}
+      {stage === 'created' && createdDetails ? <RoomCreatedView pin={createdDetails.pin} invitation={createdDetails.invitation} preferences={preferences} onContinue={() => { setCreatedDetails(undefined); setStage('room') }} /> : null}
+      {stage === 'p2p-consent' ? <P2PConsentView publicIpNotice={t(preferences.locale, 'directIpNotice')} onAccept={finishPendingJoin} onCancel={() => {
+        const pending = pendingJoinRef.current
+        if (pending) disposePendingJoin(pending)
+        pendingJoinRef.current = undefined
+        setStage('join')
+      }} /> : null}
+    </EntryShell>
+  )
+}
