@@ -22,15 +22,17 @@ describe('TURN credentials and relay policy', () => {
     )
   })
 
-  it('allows only relay candidates in TURN mode and rejects relay in P2P mode', () => {
+  it('allows only relay candidates', () => {
     const relay = 'candidate:1 1 UDP 1 192.0.2.1 49152 typ relay raddr 0.0.0.0 rport 0'
     const host = 'candidate:2 1 UDP 1 10.0.0.4 49153 typ host'
-    expect(isRtcCandidateAllowed(relay, 'turn')).toBe(true)
-    expect(isRtcCandidateAllowed(host, 'turn')).toBe(false)
-    expect(isRtcCandidateAllowed(relay, 'p2p')).toBe(false)
-    expect(isRtcCandidateAllowed(host, 'p2p')).toBe(true)
+    const serverReflexive = 'candidate:3 1 UDP 1 198.51.100.4 49154 typ srflx'
+    const peerReflexive = 'candidate:4 1 UDP 1 198.51.100.5 49155 typ prflx'
+    expect(isRtcCandidateAllowed(relay)).toBe(true)
+    expect(isRtcCandidateAllowed(host)).toBe(false)
+    expect(isRtcCandidateAllowed(serverReflexive)).toBe(false)
+    expect(isRtcCandidateAllowed(peerReflexive)).toBe(false)
 
-    expect(isRtcDescriptionAllowed(`v=0\r\na=${relay}\r\n`, 'turn')).toBe(true)
-    expect(isRtcDescriptionAllowed(`v=0\r\na=${host}\r\n`, 'turn')).toBe(false)
+    expect(isRtcDescriptionAllowed(`v=0\r\na=${relay}\r\n`)).toBe(true)
+    expect(isRtcDescriptionAllowed(`v=0\r\na=${host}\r\n`)).toBe(false)
   })
 })

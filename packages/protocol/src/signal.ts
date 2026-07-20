@@ -4,7 +4,6 @@ import {
   MAX_ICE_CANDIDATE_LENGTH,
   MAX_ROOM_MEMBERS,
   MAX_SIGNAL_SDP_LENGTH,
-  MODE_SWITCH_TIMEOUT_MS,
   PROTOCOL_VERSION,
 } from "./constants.js";
 import { NicknameSchema } from "./nickname.js";
@@ -16,17 +15,13 @@ import {
   EpochMillisecondsSchema,
   IdentityPublicKeySchema,
   MemberIdSchema,
-  PublicIpSchema,
   RequestIdSchema,
   ResumeTokenSchema,
   RoomEndReasonSchema,
   RoomIdSchema,
-  RoomModeSchema,
 } from "./primitives.js";
 
-const ModeVersionSchema = z.number().int().positive().safe();
 const SnapshotVersionSchema = z.number().int().nonnegative().safe();
-const GenerationSchema = z.number().int().nonnegative().safe();
 
 export const PublicMemberSchema = z
   .object({
@@ -35,7 +30,6 @@ export const PublicMemberSchema = z
     identityPublicKey: IdentityPublicKeySchema,
     joinedAt: EpochMillisecondsSchema,
     isOwner: z.boolean(),
-    publicIp: PublicIpSchema.optional(),
   })
   .strict();
 export type PublicMember = z.infer<typeof PublicMemberSchema>;
@@ -43,8 +37,6 @@ export type PublicMember = z.infer<typeof PublicMemberSchema>;
 export const RoomSnapshotSchema = z
   .object({
     roomId: RoomIdSchema,
-    mode: RoomModeSchema,
-    modeVersion: ModeVersionSchema,
     snapshotVersion: SnapshotVersionSchema,
     ownerId: MemberIdSchema,
     members: z.array(PublicMemberSchema).min(1).max(MAX_ROOM_MEMBERS),
@@ -78,23 +70,6 @@ export const RoomSnapshotSchema = z
         message: "Room snapshot contains duplicate member IDs",
         path: ["members"],
       });
-    }
-
-    for (const [index, member] of snapshot.members.entries()) {
-      if (snapshot.mode === "turn" && member.publicIp !== undefined) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "TURN snapshots must not expose public IP addresses",
-          path: ["members", index, "publicIp"],
-        });
-      }
-      if (snapshot.mode === "p2p" && member.publicIp === undefined) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "P2P snapshots must include every member's public IP address",
-          path: ["members", index, "publicIp"],
-        });
-      }
     }
   });
 export type RoomSnapshot = z.infer<typeof RoomSnapshotSchema>;
@@ -139,7 +114,6 @@ const ClientRoomCreateSchema = z
     payload: z
       .object({
         nickname: NicknameSchema,
-        mode: RoomModeSchema,
         admissionVerifier: AdmissionVerifierSchema,
         identityPublicKey: IdentityPublicKeySchema,
       })
@@ -190,26 +164,6 @@ const ClientRoomLeaveSchema = z
 const ClientRoomDestroySchema = z
   .object({ ...ClientEnvelopeBase, type: z.literal("room.destroy"), payload: EmptyPayloadSchema })
   .strict();
-const ClientModeRequestSchema = z
-  .object({
-    ...ClientEnvelopeBase,
-    type: z.literal("room.mode.request"),
-    payload: z.object({ mode: RoomModeSchema, expectedVersion: ModeVersionSchema }).strict(),
-  })
-  .strict();
-const ClientModeAckSchema = z
-  .object({
-    ...ClientEnvelopeBase,
-    type: z.literal("room.mode.ack"),
-    payload: z
-      .object({
-        version: ModeVersionSchema,
-        status: z.enum(["ready", "failed"]),
-        reason: z.string().max(256).optional(),
-      })
-      .strict(),
-  })
-  .strict();
 const ClientRtcDescriptionSchema = z
   .object({
     ...ClientEnvelopeBase,
@@ -217,8 +171,6 @@ const ClientRtcDescriptionSchema = z
     payload: z
       .object({
         targetMemberId: MemberIdSchema,
-        modeVersion: ModeVersionSchema,
-        generation: GenerationSchema,
         description: RTCDescriptionSchema,
       })
       .strict(),
@@ -231,8 +183,6 @@ const ClientRtcCandidateSchema = z
     payload: z
       .object({
         targetMemberId: MemberIdSchema,
-        modeVersion: ModeVersionSchema,
-        generation: GenerationSchema,
         candidate: RTCIceCandidateSchema,
       })
       .strict(),
@@ -260,8 +210,6 @@ export const ClientSignalEnvelopeSchema = z.discriminatedUnion("type", [
   ClientRoomResumeSchema,
   ClientRoomLeaveSchema,
   ClientRoomDestroySchema,
-  ClientModeRequestSchema,
-  ClientModeAckSchema,
   ClientRtcDescriptionSchema,
   ClientRtcCandidateSchema,
   ClientTurnRefreshSchema,
@@ -293,7 +241,6 @@ const ServerRoomChallengeSchema = z
       .object({
         challengeId: ChallengeIdSchema,
         challenge: ChallengeSchema,
-        mode: RoomModeSchema,
         expiresAt: EpochMillisecondsSchema,
       })
       .strict(),
@@ -334,7 +281,7 @@ const ServerMemberLeftSchema = z
     payload: z
       .object({
         memberId: MemberIdSchema,
-        reason: z.enum(["left", "timeout", "disconnected", "mode-switch-failed"]),
+        reason: z.enum(["left", "timeout", "disconnected"]),
         snapshotVersion: SnapshotVersionSchema,
       })
       .strict(),
@@ -347,29 +294,6 @@ const ServerOwnerChangedSchema = z
     payload: z.object({ ownerId: MemberIdSchema, snapshotVersion: SnapshotVersionSchema }).strict(),
   })
   .strict();
-const ServerModePendingSchema = z
-  .object({
-    ...ServerRoomEnvelopeBase,
-    type: z.literal("room.mode.pending"),
-    payload: z
-      .object({
-        previousMode: RoomModeSchema,
-        mode: RoomModeSchema,
-        version: ModeVersionSchema,
-        requestedBy: MemberIdSchema,
-        deadlineAt: EpochMillisecondsSchema,
-      })
-      .strict()
-      .refine((value) => value.mode !== value.previousMode, "Mode switch must change mode"),
-  })
-  .strict();
-const ServerModeChangedSchema = z
-  .object({
-    ...ServerRoomEnvelopeBase,
-    type: z.literal("room.mode.changed"),
-    payload: z.object({ mode: RoomModeSchema, version: ModeVersionSchema }).strict(),
-  })
-  .strict();
 const ServerRtcDescriptionSchema = z
   .object({
     ...ServerRoomEnvelopeBase,
@@ -377,8 +301,6 @@ const ServerRtcDescriptionSchema = z
     payload: z
       .object({
         fromMemberId: MemberIdSchema,
-        modeVersion: ModeVersionSchema,
-        generation: GenerationSchema,
         description: RTCDescriptionSchema,
       })
       .strict(),
@@ -391,8 +313,6 @@ const ServerRtcCandidateSchema = z
     payload: z
       .object({
         fromMemberId: MemberIdSchema,
-        modeVersion: ModeVersionSchema,
-        generation: GenerationSchema,
         candidate: RTCIceCandidateSchema,
       })
       .strict(),
@@ -448,8 +368,6 @@ export const SignalErrorCodeSchema = z.enum([
   "rate_limited",
   "resume_rejected",
   "forbidden",
-  "mode_conflict",
-  "mode_timeout",
   "member_not_found",
   "invalid_signal",
   "internal_error",
@@ -481,8 +399,6 @@ export const ServerSignalEnvelopeSchema = z.discriminatedUnion("type", [
   ServerMemberJoinedSchema,
   ServerMemberLeftSchema,
   ServerOwnerChangedSchema,
-  ServerModePendingSchema,
-  ServerModeChangedSchema,
   ServerRtcDescriptionSchema,
   ServerRtcCandidateSchema,
   ServerTurnCredentialsSchema,
@@ -504,5 +420,4 @@ export function parseServerSignalEnvelope(input: unknown): ServerSignalEnvelope 
 export const SIGNAL_LIMITS = {
   maxSdpLength: MAX_SIGNAL_SDP_LENGTH,
   maxIceCandidateLength: MAX_ICE_CANDIDATE_LENGTH,
-  modeSwitchTimeoutMs: MODE_SWITCH_TIMEOUT_MS,
 } as const;

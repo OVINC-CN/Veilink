@@ -27,9 +27,6 @@ const exactBase64UrlBytes = (byteLength: number, label: string) =>
     { message: `${label} must be canonical base64url encoding of ${byteLength} bytes` },
   );
 
-export const RoomModeSchema = z.enum(["p2p", "turn"]);
-export type RoomMode = z.infer<typeof RoomModeSchema>;
-
 export const RoomEndReasonSchema = z.enum([
   "last-member-left",
   "expired",
@@ -116,8 +113,6 @@ export const RequestIdSchema = z
 export type RequestId = z.infer<typeof RequestIdSchema>;
 
 export const EpochMillisecondsSchema = z.number().int().nonnegative().safe();
-
-export const PublicIpSchema = z.string().ip();
 
 export const PinSchema = z.string().regex(/^\d{6}$/u, "PIN must contain exactly six digits");
 export type Pin = z.infer<typeof PinSchema>;

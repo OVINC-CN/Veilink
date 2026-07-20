@@ -6,6 +6,7 @@ import fastifyStatic from '@fastify/static'
 import fastifyWebsocket from '@fastify/websocket'
 import {
   ClientSignalEnvelopeSchema,
+  PROTOCOL_VERSION,
   ServerSignalEnvelopeSchema,
   type ClientSignalEnvelope,
   type SignalErrorCode,
@@ -81,7 +82,7 @@ function send(connection: Connection, event: unknown): void {
     const safeEvent = parsed.success
       ? parsed.data
       : {
-          v: 1,
+          v: PROTOCOL_VERSION,
           type: 'error',
           payload: {
             code: 'internal_error',
@@ -123,13 +124,10 @@ function mapSignalError(error: unknown): SignalErrorCode {
       room_not_found: 'room_not_found',
       room_capacity_reached: 'room_full',
       server_capacity_reached: 'room_full',
-      mode_switching: 'mode_conflict',
       already_in_room: 'forbidden',
       member_not_found: 'member_not_found',
       resume_rejected: 'resume_rejected',
       not_owner: 'forbidden',
-      invalid_mode: 'mode_conflict',
-      invalid_mode_version: 'mode_conflict',
       target_not_found: 'member_not_found',
     }[error.code] as SignalErrorCode
   }
@@ -139,7 +137,6 @@ function mapSignalError(error: unknown): SignalErrorCode {
     }
     if (error.code.startsWith('rtc_')) return 'invalid_signal'
     if (error.code === 'session_expired') return 'member_not_found'
-    if (error.code === 'turn_unavailable' || error.code === 'turn_not_active') return 'mode_conflict'
     if (error.code === 'not_in_room' || error.code === 'already_in_room') return 'forbidden'
     return 'invalid_request'
   }
@@ -159,8 +156,6 @@ function signalErrorMessage(code: SignalErrorCode): string {
     rate_limited: 'Too many admission attempts.',
     resume_rejected: 'The in-memory session cannot be resumed.',
     forbidden: 'This action is not permitted.',
-    mode_conflict: 'The room mode changed or is currently changing.',
-    mode_timeout: 'The room mode switch timed out.',
     member_not_found: 'The room member is unavailable.',
     invalid_signal: 'The WebRTC signal violates the active transport policy.',
     internal_error: 'The server could not process the request.',
@@ -173,7 +168,7 @@ function sendSignalError(
   options: { requestId?: string; roomId?: string; retryAfterMs?: number } = {},
 ): void {
   send(connection, {
-    v: 1,
+    v: PROTOCOL_VERSION,
     type: 'error',
     ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
     ...(options.roomId === undefined ? {} : { roomId: options.roomId }),
@@ -210,7 +205,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
       maxRooms: config.maxRooms,
       maxMembers: config.maxMembers,
       disconnectGraceMs: config.disconnectGraceMs,
-      modeSwitchTimeoutMs: config.modeSwitchTimeoutMs,
     })
   const admission = new AdmissionService({
     roomStore,
@@ -319,7 +313,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
     memberId: string,
     requestId?: string,
   ): void => {
-    if (config.turnRestSecret === undefined) throw new ActionError('turn_unavailable')
     const credential = createTurnCredential({
       memberId,
       urls: config.turnUrls,
@@ -330,7 +323,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
       connection,
       withRequestId(
         {
-          v: 1,
+          v: PROTOCOL_VERSION,
           type: 'turn.credentials',
           roomId,
           payload: credential,
@@ -352,7 +345,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
       connection,
       withRequestId(
         {
-          v: 1,
+          v: PROTOCOL_VERSION,
           type,
           roomId,
           payload: {
@@ -364,40 +357,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
         requestId,
       ),
     )
-    if (session.snapshot.mode === 'turn') {
-      issueTurnCredentials(connection, roomId, session.memberId)
-    }
   }
 
   const sinkFor = (connection: Connection, roomId: string) => (event: WireEvent): void => {
     send(connection, { ...event, roomId })
-    if (event.type === 'room.mode.pending') {
-      const payload = event.payload as { mode?: string }
-      const memberId = connection.binding?.memberId
-      if (payload.mode === 'turn' && memberId !== undefined) {
-        try {
-          issueTurnCredentials(connection, roomId, memberId)
-        } catch {
-          send(connection, {
-            v: 1,
-            type: 'error',
-            roomId,
-            payload: {
-              code: 'mode_conflict',
-              message: 'TURN relay is unavailable.',
-            },
-          })
-        }
-      }
-    }
     if (event.type === 'room.ended') delete connection.binding
-    if (
-      event.type === 'error' &&
-      (event.payload as { code?: string }).code === 'mode_timeout'
-    ) {
-      delete connection.binding
-      connection.socket.close(4001, 'mode switch timeout')
-    }
   }
 
   const handleMessage = (connection: Connection, message: ClientSignalEnvelope): void => {
@@ -413,19 +377,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
         if ((roomsByCreatorIp.get(connection.publicIp)?.size ?? 0) >= config.maxRoomsPerIp) {
           throw new ActionError('room_ip_capacity_reached')
         }
-        if (message.payload.mode === 'turn' && config.turnRestSecret === undefined) {
-          throw new ActionError('turn_unavailable')
-        }
         const admissionKey = decodeKey(message.payload.admissionVerifier)
         if (admissionKey === undefined) throw new ActionError('invalid_admission_verifier')
         try {
           const session = roomStore.createRoom({
             roomId,
             admissionKey,
-            mode: message.payload.mode,
             nickname: message.payload.nickname,
             identityPublicKey: message.payload.identityPublicKey,
-            publicIp: connection.publicIp,
             transportId: connection.id,
             sink: sinkFor(connection, roomId),
           })
@@ -453,13 +412,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
           connection,
           withRequestId(
             {
-              v: 1,
+              v: PROTOCOL_VERSION,
               type: 'room.challenge',
               roomId,
               payload: {
                 challengeId: challenge.challengeId,
                 challenge: challenge.nonce,
-                mode: roomStore.getRoomMode(roomId)?.mode ?? 'turn',
                 expiresAt: challenge.expiresAt,
               },
             },
@@ -484,7 +442,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
           roomId,
           nickname: message.payload.nickname,
           identityPublicKey: message.payload.identityPublicKey,
-          publicIp: connection.publicIp,
           transportId: connection.id,
           sink: sinkFor(connection, roomId),
         })
@@ -499,7 +456,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
           memberId: message.payload.memberId,
           resumeToken: message.payload.resumeToken,
           identityPublicKey: message.payload.identityPublicKey,
-          publicIp: connection.publicIp,
           transportId: connection.id,
           sink: sinkFor(connection, roomId),
         })
@@ -521,44 +477,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
         break
       }
 
-      case 'room.mode.request': {
-        const binding = assertBound(connection, roomId)
-        if (message.payload.mode === 'turn' && config.turnRestSecret === undefined) {
-          throw new ActionError('turn_unavailable')
-        }
-        roomStore.requestModeSwitch(
-          roomId,
-          binding.memberId,
-          connection.id,
-          message.payload.mode,
-          message.payload.expectedVersion,
-        )
-        break
-      }
-
-      case 'room.mode.ack': {
-        const binding = assertBound(connection, roomId)
-        roomStore.acknowledgeModeSwitch(
-          roomId,
-          binding.memberId,
-          connection.id,
-          message.payload.version,
-          message.payload.status,
-        )
-        if (message.payload.status === 'failed') {
-          delete connection.binding
-          connection.socket.close(4_001, 'mode switch failed')
-        }
-        break
-      }
-
       case 'rtc.description': {
         const binding = assertBound(connection, roomId)
-        const roomMode = roomStore.getRoomMode(roomId)
-        if (
-          roomMode === undefined ||
-          !isRtcDescriptionAllowed(message.payload.description.sdp ?? '', roomMode.mode)
-        ) {
+        if (!isRtcDescriptionAllowed(message.payload.description.sdp ?? '')) {
           throw new ActionError('rtc_transport_policy_violation')
         }
         roomStore.forwardRtcDescription({
@@ -566,8 +487,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
           senderId: binding.memberId,
           transportId: connection.id,
           targetMemberId: message.payload.targetMemberId,
-          modeVersion: message.payload.modeVersion,
-          generation: message.payload.generation,
           description: message.payload.description,
         })
         break
@@ -575,11 +494,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
 
       case 'rtc.candidate': {
         const binding = assertBound(connection, roomId)
-        const roomMode = roomStore.getRoomMode(roomId)
-        if (
-          roomMode === undefined ||
-          !isRtcCandidateAllowed(message.payload.candidate.candidate, roomMode.mode)
-        ) {
+        if (!isRtcCandidateAllowed(message.payload.candidate.candidate)) {
           throw new ActionError('rtc_transport_policy_violation')
         }
         roomStore.forwardRtcCandidate({
@@ -587,8 +502,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
           senderId: binding.memberId,
           transportId: connection.id,
           targetMemberId: message.payload.targetMemberId,
-          modeVersion: message.payload.modeVersion,
-          generation: message.payload.generation,
           candidate: message.payload.candidate,
         })
         break
@@ -596,9 +509,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
 
       case 'turn.credentials.refresh': {
         const binding = assertBound(connection, roomId)
-        if (!roomStore.canIssueTurnCredentials(roomId)) {
-          throw new ActionError('turn_not_active')
-        }
         issueTurnCredentials(connection, roomId, binding.memberId, requestId)
         break
       }
@@ -613,7 +523,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
           connection,
           withRequestId(
             {
-              v: 1,
+              v: PROTOCOL_VERSION,
               type: 'heartbeat.ack',
               roomId,
               payload: { sentAt: message.payload.sentAt, serverNow: Date.now() },
@@ -674,7 +584,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppContex
           typeof parsedJson === 'object' &&
           parsedJson !== null &&
           'v' in parsedJson &&
-          parsedJson.v !== 1
+          parsedJson.v !== PROTOCOL_VERSION
         sendSignalError(connection, unsupportedVersion ? 'unsupported_version' : 'invalid_request')
         if (connection.malformedMessages >= 3) connection.socket.close(1_008, 'invalid messages')
         return

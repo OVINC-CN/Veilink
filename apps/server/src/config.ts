@@ -1,6 +1,8 @@
 import { isIP } from 'node:net'
 import { fileURLToPath } from 'node:url'
 
+import { PROTOCOL_VERSION } from '@veilink/protocol'
+
 export const MAX_ROOM_TTL_MS = 24 * 60 * 60 * 1_000
 
 export interface ServerConfig {
@@ -18,18 +20,16 @@ export interface ServerConfig {
   maxMembers: number
   heartbeatIntervalMs: number
   disconnectGraceMs: number
-  modeSwitchTimeoutMs: number
   challengeTtlMs: number
   trustProxy: false | string[]
   staticRoot: string
-  stunUrls: string[]
   turnUrls: string[]
-  turnRestSecret?: string
+  turnRestSecret: string
   turnCredentialTtlSeconds: number
 }
 
 export interface PublicConfig {
-  protocolVersion: 1
+  protocolVersion: typeof PROTOCOL_VERSION
   limits: {
     maxMembers: number
     maxRoomTtlMs: number
@@ -38,12 +38,6 @@ export interface PublicConfig {
   }
   heartbeatIntervalMs: number
   disconnectGraceMs: number
-  modeSwitchTimeoutMs: number
-  ice: {
-    stunUrls: string[]
-    turnUrls: string[]
-    turnAvailable: boolean
-  }
 }
 
 function parseInteger(
@@ -62,17 +56,17 @@ function parseInteger(
   return parsed
 }
 
-function parseUrlList(
+function parseRequiredUrlList(
   value: string | undefined,
-  fallback: string[],
+  name: string,
   allowedSchemes: readonly string[],
 ): string[] {
-  if (value === undefined || value.trim() === '') return fallback
+  if (value === undefined || value.trim() === '') throw new Error(`${name} is required`)
   const urls = value
     .split(',')
     .map((url) => url.trim())
     .filter(Boolean)
-  if (urls.length === 0) return fallback
+  if (urls.length === 0) throw new Error(`${name} is required`)
   for (const url of urls) {
     const separator = url.indexOf(':')
     const scheme = separator === -1 ? '' : url.slice(0, separator)
@@ -151,7 +145,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     MAX_ROOM_TTL_MS / 1_000,
   )
   const turnRestSecret = env.TURN_REST_SECRET?.trim()
-  if (turnRestSecret !== undefined && turnRestSecret.length < 32) {
+  if (!turnRestSecret) throw new Error('TURN_REST_SECRET is required')
+  if (turnRestSecret.length < 32) {
     throw new Error('TURN_REST_SECRET must contain at least 32 characters')
   }
 
@@ -176,18 +171,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     maxMembers: 8,
     heartbeatIntervalMs: 15_000,
     disconnectGraceMs: 30_000,
-    modeSwitchTimeoutMs: 30_000,
     challengeTtlMs: 30_000,
     trustProxy: parseTrustProxy(env.TRUST_PROXY_CIDRS),
     staticRoot:
       env.WEB_DIST_DIR?.trim() || fileURLToPath(new URL('../../web/dist/', import.meta.url)),
-    stunUrls: parseUrlList(env.STUN_URLS, ['stun:turn:3478'], ['stun', 'stuns']),
-    turnUrls: parseUrlList(
+    turnUrls: parseRequiredUrlList(
       env.TURN_URLS,
-      ['turn:turn:3478?transport=udp', 'turn:turn:3478?transport=tcp'],
+      'TURN_URLS',
       ['turn', 'turns'],
     ),
-    ...(turnRestSecret === undefined ? {} : { turnRestSecret }),
+    turnRestSecret,
     turnCredentialTtlSeconds: parseInteger(
       env.TURN_CREDENTIAL_TTL_SECONDS,
       600,
@@ -200,7 +193,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
 
 export function getPublicConfig(config: ServerConfig): PublicConfig {
   return {
-    protocolVersion: 1,
+    protocolVersion: PROTOCOL_VERSION,
     limits: {
       maxMembers: config.maxMembers,
       maxRoomTtlMs: MAX_ROOM_TTL_MS,
@@ -209,11 +202,5 @@ export function getPublicConfig(config: ServerConfig): PublicConfig {
     },
     heartbeatIntervalMs: config.heartbeatIntervalMs,
     disconnectGraceMs: config.disconnectGraceMs,
-    modeSwitchTimeoutMs: config.modeSwitchTimeoutMs,
-    ice: {
-      stunUrls: [...config.stunUrls],
-      turnUrls: [...config.turnUrls],
-      turnAvailable: config.turnRestSecret !== undefined,
-    },
   }
 }

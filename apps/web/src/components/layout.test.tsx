@@ -35,7 +35,8 @@ describe('minimal entry experience', () => {
 
     fireEvent.change(screen.getByRole('textbox', { name: '昵称' }), { target: { value: 'Mira' } })
     fireEvent.click(screen.getByRole('button', { name: /创建聊天室/u }))
-    expect(onCreate).toHaveBeenCalledWith('Mira', 'turn')
+    expect(onCreate).toHaveBeenCalledWith('Mira')
+    expect(screen.queryByText('P2P 直连')).not.toBeInTheDocument()
   })
 })
 
@@ -46,8 +47,6 @@ describe('selected single-column room layout', () => {
       roomId: 'room-id',
       memberId: 'member-owner',
       ownerId: 'member-owner',
-      mode: 'p2p',
-      modeVersion: 1,
       expiresAt: Date.now() + 60_000,
       linkSecret: 'link-secret',
       fingerprint: 'ABCD EFGH IJKL MNOP',
@@ -65,7 +64,6 @@ describe('selected single-column room layout', () => {
           identityPublicKey: 'public-key',
           joinedAt: 1,
           isOwner: true,
-          publicIp: '203.0.113.5',
         },
         {
           id: 'member-two',
@@ -73,7 +71,6 @@ describe('selected single-column room layout', () => {
           identityPublicKey: 'public-key-two',
           joinedAt: 2,
           isOwner: false,
-          publicIp: '2001:db8::7',
         },
       ],
     }
@@ -86,7 +83,6 @@ describe('selected single-column room layout', () => {
         onPreferences={vi.fn()}
         onSend={vi.fn()}
         onFiles={vi.fn()}
-        onSwitchMode={vi.fn()}
         onLeave={vi.fn()}
         onDestroy={vi.fn()}
       />,
@@ -95,7 +91,7 @@ describe('selected single-column room layout', () => {
     expect(screen.getByRole('main')).toHaveClass('chat-main')
     expect(screen.getByRole('navigation', { name: '房间控制' })).toBeInTheDocument()
     expect(container.querySelector('aside')).toBeNull()
-    expect(screen.queryByText('203.0.113.5')).not.toBeInTheDocument()
+    expect(screen.getByText('TURN 中继')).toBeInTheDocument()
 
     const membersButton = screen.getByRole('button', { name: /成员 2/u })
     expect(membersButton).toHaveAttribute('aria-expanded', 'false')
@@ -103,7 +99,6 @@ describe('selected single-column room layout', () => {
     expect(membersButton).toHaveAttribute('aria-expanded', 'true')
 
     const membersPanel = screen.getByRole('region', { name: '成员' })
-    expect(within(membersPanel).getByText('203.0.113.5')).toBeInTheDocument()
-    expect(within(membersPanel).getByText('2001:db8::7')).toBeInTheDocument()
+    expect(within(membersPanel).getByText(/所有 WebRTC 连接均强制通过 TURN 中继/u)).toBeInTheDocument()
   })
 })

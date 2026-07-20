@@ -6,6 +6,8 @@ import {
   EncryptedFileChunkSchema,
   IdentityPublicKeySchema,
   NicknameSchema,
+  PEER_CONNECTION_TIMEOUT_MS,
+  PROTOCOL_VERSION,
   RoomIdSchema,
   buildInvitePath,
   generateLinkSecret,
@@ -23,7 +25,6 @@ import {
 import { CreateRoomView } from './components/CreateRoomView'
 import { EntryShell } from './components/EntryShell'
 import { JoinRoomView } from './components/JoinRoomView'
-import { P2PConsentView } from './components/P2PConsentView'
 import { RoomCreatedView } from './components/RoomCreatedView'
 import { RoomShell } from './components/RoomShell'
 import { deriveRoomKeys } from './crypto/derive'
@@ -37,23 +38,20 @@ import {
 } from './crypto/messages'
 import type { DerivedKeys, SessionIdentity } from './crypto/types'
 import { usePreferences } from './hooks/usePreferences'
-import { t } from './i18n'
 import { bytesToBase64Url, randomId } from './lib/encoding'
-import type { ActiveRoom, AttachmentView, ChatMessage, Member, RichTextDocument, RoomMode } from './models'
+import type { ActiveRoom, AttachmentView, ChatMessage, Member, RichTextDocument } from './models'
 import { validateMedia } from './mediaValidation'
 import { PeerMesh, type IceCredentials, type PeerSignalPayload } from './transport/PeerMesh'
 import { SignalClient, type SessionConfirmation } from './transport/SignalClient'
 
 interface PublicConfig {
-  protocolVersion: 1
+  protocolVersion: typeof PROTOCOL_VERSION
   limits: { maxMembers: number; maxRoomTtlMs: number; roomTtlMs: number; maxFileSizeMb: number }
   heartbeatIntervalMs: number
   disconnectGraceMs: number
-  modeSwitchTimeoutMs: number
-  ice: { stunUrls: string[]; turnUrls: string[]; turnAvailable: boolean }
 }
 
-type Stage = 'create' | 'join' | 'created' | 'p2p-consent' | 'room'
+type Stage = 'create' | 'join' | 'created' | 'room'
 
 const MAX_DATA_FRAME_BYTES = 128 * 1024
 const MAX_MESSAGES_IN_MEMORY = 500
@@ -82,10 +80,8 @@ interface SessionRuntime {
   signal: SignalClient
   identity: SessionIdentity
   mesh: PeerMesh
-  config: PublicConfig
   keys: DerivedKeys
   linkSecret: string
-  generation: number
   replayCounters: Map<string, number>
   peerRateWindows: Map<string, PeerRateWindow>
   peerViolationWindows: Map<string, PeerViolationWindow>
@@ -100,13 +96,7 @@ interface SessionRuntime {
   seenAttachments: Set<string>
   outboundTransfers: Map<string, AbortController>
   transferEpoch: number
-  switchingMode: boolean
   unsubscribe: () => void
-  pendingMode?: {
-    mode: RoomMode
-    version: number
-    turnCredentials?: TurnCredentials
-  }
   turnRefreshTimer?: number
 }
 
@@ -115,7 +105,6 @@ interface PendingJoin {
   identity: SessionIdentity
   signal: SignalClient
   keys: DerivedKeys
-  config: PublicConfig
   challenge: Awaited<ReturnType<SignalClient['beginJoin']>>
 }
 
@@ -133,7 +122,6 @@ function memberFromWire(member: PublicMember): Member {
     identityPublicKey: member.identityPublicKey,
     joinedAt: member.joinedAt,
     isOwner: member.isOwner,
-    ...(member.publicIp ? { publicIp: member.publicIp } : {}),
   }
 }
 
@@ -148,8 +136,6 @@ function activeRoomFromSnapshot(
     roomId: snapshot.roomId,
     memberId: selfMemberId,
     ownerId: snapshot.ownerId,
-    mode: snapshot.mode,
-    modeVersion: snapshot.modeVersion,
     expiresAt,
     linkSecret,
     fingerprint: keys.fingerprint,
@@ -162,7 +148,7 @@ async function loadPublicConfig(): Promise<PublicConfig> {
   const response = await fetch('/api/config', { cache: 'no-store', credentials: 'omit', headers: { Accept: 'application/json' } })
   if (!response.ok) throw new Error('无法读取服务器配置')
   const value = await response.json() as PublicConfig
-  if (value.protocolVersion !== 1 || !Array.isArray(value.ice?.stunUrls) || !Array.isArray(value.ice?.turnUrls)) {
+  if (value.protocolVersion !== PROTOCOL_VERSION) {
     throw new Error('服务器协议版本不受支持')
   }
   return value
@@ -341,7 +327,7 @@ export default function App() {
     const timer = runtime.peerConnectionTimers.get(memberId)
     if (timer !== undefined) window.clearTimeout(timer)
     runtime.peerConnectionTimers.delete(memberId)
-    if (runtime.peerConnectionTimers.size === 0 && !runtime.switchingMode && runtimeRef.current === runtime) {
+    if (runtime.peerConnectionTimers.size === 0 && runtimeRef.current === runtime) {
       setTransportReady(true)
     }
   }
@@ -353,7 +339,6 @@ export default function App() {
 
   const armPeerConnectionTimer = (runtime: SessionRuntime, memberId: string): void => {
     if (
-      runtime.switchingMode ||
       runtimeRef.current !== runtime ||
       !roomRef.current?.members.some((member) => member.id === memberId) ||
       memberId === roomRef.current?.memberId ||
@@ -365,7 +350,6 @@ export default function App() {
       runtime.peerConnectionTimers.delete(memberId)
       if (
         runtimeRef.current !== runtime ||
-        runtime.switchingMode ||
         !roomRef.current?.members.some((member) => member.id === memberId) ||
         runtime.mesh.connectedMemberIds().includes(memberId)
       ) return
@@ -374,7 +358,7 @@ export default function App() {
       window.history.replaceState(null, '', '/')
       initialRoomId.current = undefined
       setStage('create')
-    }, runtime.config.modeSwitchTimeoutMs)
+    }, PEER_CONNECTION_TIMEOUT_MS)
     runtime.peerConnectionTimers.set(memberId, timer)
   }
 
@@ -412,7 +396,6 @@ export default function App() {
   const stopRuntime = (sendLeave: boolean): void => {
     const runtime = runtimeRef.current
     if (runtime) {
-      runtime.switchingMode = true
       runtime.unsubscribe()
       clearPeerConnectionTimers(runtime)
       runtime.mesh.destroy()
@@ -675,25 +658,16 @@ export default function App() {
     identity: SessionIdentity,
     keys: DerivedKeys,
     secret: string,
-    config: PublicConfig,
   ): Promise<ActiveRoom> => {
     const initialRoom = activeRoomFromSnapshot(confirmation.snapshot, confirmation.selfMemberId, keys, secret)
-    let turnCredentials: TurnCredentials | undefined
-    if (initialRoom.mode === 'turn') {
-      if (!config.ice.turnAvailable) throw new Error('服务器未配置 TURN 中继')
-      turnCredentials = await signal.requestTurnCredentials()
-    }
+    const turnCredentials = await signal.requestTurnCredentials()
     const runtime = {} as SessionRuntime
     const mesh = new PeerMesh({
       localMemberId: initialRoom.memberId,
-      mode: initialRoom.mode,
-      stunUrls: config.ice.stunUrls,
-      ...(turnCredentials ? { turnCredentials: turnIce(turnCredentials) } : {}),
+      turnCredentials: turnIce(turnCredentials),
       sendSignal: (targetMemberId, payload) => {
-        const active = roomRef.current
-        if (!active) return
-        if (payload.description) signal.sendRtcDescription(targetMemberId as never, active.modeVersion, runtime.generation, payload.description)
-        if (payload.candidate) signal.sendRtcCandidate(targetMemberId as never, active.modeVersion, runtime.generation, payload.candidate)
+        if (payload.description) signal.sendRtcDescription(targetMemberId as never, payload.description)
+        if (payload.candidate) signal.sendRtcCandidate(targetMemberId as never, payload.candidate)
       },
       onData: (sourceMemberId, data) => {
         const previous = runtime.peerDataQueues.get(sourceMemberId) ?? Promise.resolve()
@@ -717,7 +691,7 @@ export default function App() {
     const unsubscribe = signal.subscribe((frame) => {
       void handleServerFrame(frame).catch((caught: unknown) => {
         setError(caught instanceof Error ? caught.message : '无法处理服务器状态更新')
-        if (frame.type === 'room.mode.pending' || frame.type === 'room.mode.changed' || frame.type === 'room.resumed' || frame.type === 'room.snapshot') {
+        if (frame.type === 'room.resumed' || frame.type === 'room.snapshot') {
           stopRuntime(false)
           window.history.replaceState(null, '', '/')
           initialRoomId.current = undefined
@@ -729,10 +703,8 @@ export default function App() {
       signal,
       identity,
       mesh,
-      config,
       keys,
       linkSecret: secret,
-      generation: initialRoom.modeVersion,
       replayCounters: new Map(),
       peerRateWindows: new Map(),
       peerViolationWindows: new Map(),
@@ -747,7 +719,6 @@ export default function App() {
       seenAttachments: new Set(),
       outboundTransfers: new Map(),
       transferEpoch: 0,
-      switchingMode: false,
       unsubscribe,
     } satisfies SessionRuntime)
     runtimeRef.current = runtime
@@ -755,7 +726,7 @@ export default function App() {
     mesh.syncMembers(initialRoom.members)
     armRoomConnectionTimers(runtime, initialRoom.members)
     setTransportReady(runtime.peerConnectionTimers.size === 0)
-    if (turnCredentials) scheduleTurnRefresh(runtime, turnCredentials)
+    scheduleTurnRefresh(runtime, turnCredentials)
     return initialRoom
   }
 
@@ -766,24 +737,8 @@ export default function App() {
     if (frame.type === 'room.snapshot' || frame.type === 'room.resumed') {
       const snapshot = frame.type === 'room.snapshot' ? frame.payload : frame.payload.snapshot
       const next = activeRoomFromSnapshot(snapshot, current.memberId, current.keys, current.linkSecret)
-      const requiresRebuild = snapshot.mode !== current.mode || snapshot.modeVersion !== current.modeVersion
-      if (requiresRebuild) {
-        runtime.switchingMode = true
-        setTransportReady(false)
-        clearPeerConnectionTimers(runtime)
-        cancelTransfers(runtime)
-        let credentials: TurnCredentials | undefined
-        if (snapshot.mode === 'turn') credentials = await runtime.signal.requestTurnCredentials()
-        await runtime.mesh.reconfigure(snapshot.mode, credentials ? turnIce(credentials) : undefined)
-        runtime.generation = snapshot.modeVersion
-        runtime.pendingMode = undefined
-        if (runtime.turnRefreshTimer !== undefined) window.clearTimeout(runtime.turnRefreshTimer)
-        runtime.turnRefreshTimer = undefined
-        if (credentials) scheduleTurnRefresh(runtime, credentials)
-      }
       updateRoom(next)
       runtime.mesh.syncMembers(next.members)
-      runtime.switchingMode = false
       armRoomConnectionTimers(runtime, next.members)
       setTransportReady(runtime.peerConnectionTimers.size === 0)
       return
@@ -831,88 +786,10 @@ export default function App() {
       return
     }
     if (frame.type === 'rtc.description' || frame.type === 'rtc.candidate') {
-      if (frame.payload.modeVersion !== current.modeVersion || frame.payload.generation !== runtime.generation) return
       const payload: PeerSignalPayload = frame.type === 'rtc.description'
         ? { description: frame.payload.description as RTCSessionDescriptionInit }
         : { candidate: frame.payload.candidate as RTCIceCandidateInit }
       await runtime.mesh.handleSignal(frame.payload.fromMemberId, payload)
-      return
-    }
-    if (frame.type === 'room.mode.pending') {
-      runtime.switchingMode = true
-      setTransportReady(false)
-      clearPeerConnectionTimers(runtime)
-      cancelTransfers(runtime)
-      updateMessages((currentMessages) => currentMessages.map((message) => ({
-        ...message,
-        attachments: message.attachments.map((attachment) => attachment.status === 'sending' || attachment.status === 'receiving' ? { ...attachment, status: 'cancelled' } : attachment),
-      })))
-      if (runtime.turnRefreshTimer !== undefined) window.clearTimeout(runtime.turnRefreshTimer)
-      runtime.turnRefreshTimer = undefined
-      try {
-        let credentials: TurnCredentials | undefined
-        if (frame.payload.mode === 'turn') credentials = await runtime.signal.requestTurnCredentials()
-        await runtime.mesh.reconfigure(frame.payload.mode, credentials ? turnIce(credentials) : undefined)
-        runtime.pendingMode = {
-          mode: frame.payload.mode,
-          version: frame.payload.version,
-          ...(credentials ? { turnCredentials: credentials } : {}),
-        }
-        runtime.signal.acknowledgeMode(frame.payload.version, 'ready')
-      } catch (caught) {
-        runtime.pendingMode = undefined
-        try {
-          runtime.signal.acknowledgeMode(
-            frame.payload.version,
-            'failed',
-            caught instanceof Error ? caught.message.slice(0, 160) : 'mode preparation failed',
-          )
-        } catch {
-          // The signaling socket may already have closed; local teardown still proceeds.
-        }
-        setError('无法安全切换传输模式，当前会话已退出。')
-        window.setTimeout(() => {
-          if (runtimeRef.current !== runtime) return
-          stopRuntime(false)
-          window.history.replaceState(null, '', '/')
-          initialRoomId.current = undefined
-          setStage('create')
-        }, 0)
-      }
-      return
-    }
-    if (frame.type === 'room.mode.changed') {
-      const prepared = runtime.pendingMode?.mode === frame.payload.mode && runtime.pendingMode.version === frame.payload.version
-        ? runtime.pendingMode
-        : undefined
-      let credentials = prepared?.turnCredentials
-      if (!prepared) {
-        if (frame.payload.mode === 'turn') credentials = await runtime.signal.requestTurnCredentials()
-        await runtime.mesh.reconfigure(frame.payload.mode, credentials ? turnIce(credentials) : undefined)
-      }
-      runtime.pendingMode = undefined
-      runtime.generation = frame.payload.version
-      updateRoom((value) => ({
-        ...value,
-        mode: frame.payload.mode,
-        modeVersion: frame.payload.version,
-        members: frame.payload.mode === 'turn'
-          ? value.members.map(({ id, nickname, identityPublicKey, joinedAt, isOwner }) => ({
-              id,
-              nickname,
-              identityPublicKey,
-              joinedAt,
-              isOwner,
-            }))
-          : value.members,
-      }))
-      runtime.mesh.syncMembers(roomRef.current?.members ?? [])
-      runtime.switchingMode = false
-      armRoomConnectionTimers(runtime, roomRef.current?.members ?? [])
-      setTransportReady(runtime.peerConnectionTimers.size === 0)
-      if (runtime.turnRefreshTimer !== undefined) window.clearTimeout(runtime.turnRefreshTimer)
-      runtime.turnRefreshTimer = undefined
-      if (credentials) scheduleTurnRefresh(runtime, credentials)
       return
     }
     if (frame.type === 'room.ended') {
@@ -937,7 +814,7 @@ export default function App() {
     if (preferences.rememberNickname) setPreferences({ ...preferences, nickname })
   }
 
-  const createRoom = async (rawNickname: string, mode: RoomMode): Promise<void> => {
+  const createRoom = async (rawNickname: string): Promise<void> => {
     setBusy(true)
     setError(undefined)
     let keys: DerivedKeys | undefined
@@ -948,18 +825,16 @@ export default function App() {
       const roomId = generateRoomId()
       const secret = generateLinkSecret()
       const pin = generatePin()
-      const config = await loadPublicConfig()
-      if (mode === 'turn' && !config.ice.turnAvailable) throw new Error('服务器尚未配置 TURN 中继，请选择 P2P 或完成部署配置。')
+      await loadPublicConfig()
       keys = await deriveRoomKeys(pin, roomId, secret)
       identity = await createSessionIdentity()
       signal = new SignalClient(roomId)
       const confirmation = await signal.createRoom({
         nickname,
-        mode,
         admissionKey: keys.admissionKey,
         identityPublicKey: IdentityPublicKeySchema.parse(bytesToBase64Url(identity.publicKey)),
       })
-      await setupRuntime(confirmation, signal, identity, keys, secret, config)
+      await setupRuntime(confirmation, signal, identity, keys, secret)
       keys = undefined
       identity = undefined
       signal = undefined
@@ -995,7 +870,7 @@ export default function App() {
         challengeId: pending.challenge.challengeId,
         challenge: pending.challenge.challenge,
       })
-      await setupRuntime(confirmation, pending.signal, pending.identity, pending.keys, linkSecret!, pending.config)
+      await setupRuntime(confirmation, pending.signal, pending.identity, pending.keys, linkSecret!)
       rememberNickname(pending.nickname)
       pendingJoinRef.current = undefined
       setStage('room')
@@ -1023,17 +898,16 @@ export default function App() {
     let signal: SignalClient | undefined
     try {
       const nickname = NicknameSchema.parse(rawNickname)
-      const config = await loadPublicConfig()
+      await loadPublicConfig()
       keys = await deriveRoomKeys(pin, initialRoomId.current, linkSecret)
       identity = await createSessionIdentity()
       signal = new SignalClient(initialRoomId.current)
       const challenge = await signal.beginJoin(nickname, IdentityPublicKeySchema.parse(bytesToBase64Url(identity.publicKey)))
-      pendingJoinRef.current = { nickname, identity, signal, keys, config, challenge }
+      pendingJoinRef.current = { nickname, identity, signal, keys, challenge }
       keys = undefined
       identity = undefined
       signal = undefined
-      if (challenge.mode === 'p2p') setStage('p2p-consent')
-      else await finishPendingJoin()
+      await finishPendingJoin()
     } catch (caught) {
       signal?.close()
       if (identity) destroyIdentity(identity)
@@ -1047,7 +921,7 @@ export default function App() {
   const sendPayload = async (payload: ChatPayload): Promise<string> => {
     const runtime = runtimeRef.current
     const current = roomRef.current
-    if (!runtime || !current || runtime.switchingMode) throw new Error('传输模式切换中，请稍后再发送')
+    if (!runtime || !current) throw new Error('安全连接尚未就绪')
     const validated = ChatPayloadSchema.parse(payload)
     const frame = await encryptChatPayload(validated, current.memberId, runtime.identity, runtime.keys.messageKey)
     await runtime.mesh.broadcast(JSON.stringify(frame))
@@ -1082,11 +956,11 @@ export default function App() {
     const runtime = runtimeRef.current
     const current = roomRef.current
     const self = current?.members.find((member) => member.id === current.memberId)
-    if (!runtime || !current || !self || runtime.switchingMode) return
+    if (!runtime || !current || !self) return
     const accepted = files.slice(0, 4)
     const transferEpoch = runtime.transferEpoch
     for (const file of accepted) {
-      if (runtimeRef.current !== runtime || runtime.switchingMode || runtime.transferEpoch !== transferEpoch) break
+      if (runtimeRef.current !== runtime || runtime.transferEpoch !== transferEpoch) break
       const maxBytes = preferences.maxFileSizeMb * 1024 * 1024
       if (file.size < 1 || file.size > maxBytes) {
         setError(`文件 ${file.name} 超出本地 ${preferences.maxFileSizeMb} MiB 上限`)
@@ -1143,7 +1017,7 @@ export default function App() {
           async (chunk: LocalEncryptedFileChunk) => {
             if (controller.signal.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
             const wire: EncryptedFileChunk = EncryptedFileChunkSchema.parse({
-              v: 1,
+              v: PROTOCOL_VERSION,
               type: 'file-chunk',
               attachmentId,
               chunkIndex: chunk.index,
@@ -1188,29 +1062,15 @@ export default function App() {
     runtime.signal.destroyRoom()
   }
 
-  const switchMode = async (mode: RoomMode): Promise<void> => {
-    const runtime = runtimeRef.current
-    const current = roomRef.current
-    if (!runtime || !current || mode === current.mode) return
-    if (mode === 'p2p' && !window.confirm(t(preferences.locale, 'directIpNotice'))) return
-    runtime.signal.requestMode(mode, current.modeVersion)
-  }
-
   if (stage === 'room' && room) {
-    return <RoomShell room={room} messages={messages} preferences={preferences} connected={transportReady} error={error} onPreferences={setPreferences} onSend={sendDocument} onFiles={sendFiles} onSwitchMode={switchMode} onLeave={leaveRoom} onDestroy={destroyRoom} />
+    return <RoomShell room={room} messages={messages} preferences={preferences} connected={transportReady} error={error} onPreferences={setPreferences} onSend={sendDocument} onFiles={sendFiles} onLeave={leaveRoom} onDestroy={destroyRoom} />
   }
 
   return (
     <EntryShell preferences={preferences} onPreferences={setPreferences}>
-      {stage === 'create' ? <CreateRoomView preferences={preferences} busy={busy} error={error} onPreferences={setPreferences} onCreate={createRoom} /> : null}
+      {stage === 'create' ? <CreateRoomView preferences={preferences} busy={busy} error={error} onCreate={createRoom} /> : null}
       {stage === 'join' ? <JoinRoomView preferences={preferences} hasLinkSecret={Boolean(linkSecret)} busy={busy} error={error} onJoin={joinRoom} /> : null}
       {stage === 'created' && createdDetails ? <RoomCreatedView pin={createdDetails.pin} invitation={createdDetails.invitation} preferences={preferences} onContinue={() => { setCreatedDetails(undefined); setStage('room') }} /> : null}
-      {stage === 'p2p-consent' ? <P2PConsentView publicIpNotice={t(preferences.locale, 'directIpNotice')} onAccept={finishPendingJoin} onCancel={() => {
-        const pending = pendingJoinRef.current
-        if (pending) disposePendingJoin(pending)
-        pendingJoinRef.current = undefined
-        setStage('join')
-      }} /> : null}
     </EntryShell>
   )
 }

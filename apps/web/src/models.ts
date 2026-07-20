@@ -1,14 +1,11 @@
 import type { DerivedKeys } from './crypto/types'
 
-export type RoomMode = 'p2p' | 'turn'
-
 export interface Member {
   id: string
   nickname: string
   identityPublicKey: string
   joinedAt: number
   isOwner: boolean
-  publicIp?: string
 }
 
 export interface RichMark {
@@ -53,8 +50,6 @@ export interface ActiveRoom {
   roomId: string
   memberId: string
   ownerId: string
-  mode: RoomMode
-  modeVersion: number
   expiresAt: number
   linkSecret: string
   fingerprint: string

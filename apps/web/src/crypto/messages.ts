@@ -1,5 +1,5 @@
 import sodium from 'libsodium-wrappers-sumo'
-import type { EncryptedChatFrame, IdentityPublicKey } from '@veilink/protocol'
+import { PROTOCOL_VERSION, type EncryptedChatFrame, type IdentityPublicKey } from '@veilink/protocol'
 import { base64UrlToBytes, bytesToBase64Url, concatBytes, randomId } from '../lib/encoding'
 import type { SessionIdentity } from './types'
 
@@ -63,7 +63,7 @@ export async function encryptChatPayload(
     messageKey,
   )
   const unsigned: Omit<EncryptedChatFrame, 'signature'> = {
-    v: 1,
+    v: PROTOCOL_VERSION,
     type: 'chat',
     messageId: messageId as never,
     senderId: senderId as never,

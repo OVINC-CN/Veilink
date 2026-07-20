@@ -38,7 +38,6 @@ describe('preference persistence boundary', () => {
     expect(saved).toEqual({
       locale: 'en-US',
       theme: 'dark',
-      defaultRoomMode: 'p2p',
       maxFileSizeMb: 100,
       sendShortcut: 'mod-enter',
       showTimestamps: false,
@@ -47,6 +46,7 @@ describe('preference persistence boundary', () => {
       nickname: 'Mira',
     })
     expect(persisted).toEqual(saved)
+    expect(persisted).not.toHaveProperty('defaultRoomMode')
     expect(Object.keys(localStorage)).toEqual([PREFERENCES_KEY])
   })
 

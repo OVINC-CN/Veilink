@@ -35,7 +35,6 @@ describe("privacy-preserving preferences", () => {
     v: 1 as const,
     locale: "zh-CN" as const,
     theme: "system" as const,
-    defaultRoomMode: "turn" as const,
     maxFileSizeMb: 25,
     sendShortcut: "enter" as const,
     showTimestamps: true,
@@ -56,6 +55,11 @@ describe("privacy-preserving preferences", () => {
   it("keeps a normalized nickname only after opt-in", () => {
     const parsed = ClientPreferencesSchema.parse({ ...base, rememberNickname: true, nickname: " Café  " });
     expect(parsed.nickname).toBe("Café");
+  });
+
+  it("drops the legacy room mode while preserving other preferences", () => {
+    const stored = JSON.stringify({ ...base, theme: "dark", defaultRoomMode: "p2p" });
+    expect(parseStoredPreferences(stored)).toEqual({ ...base, theme: "dark" });
   });
 
   it("rejects unknown or sensitive keys and falls back atomically", () => {

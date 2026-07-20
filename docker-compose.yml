@@ -40,7 +40,6 @@ services:
       APP_ORIGIN: ${APP_ORIGIN:?Set APP_ORIGIN to the exact public HTTPS origin}
       TRUST_PROXY_CIDRS: ${TRUST_PROXY_CIDRS:?Set explicit reverse-proxy CIDRs}
       ROOM_TTL_SECONDS: ${ROOM_TTL_SECONDS:-86400}
-      STUN_URLS: ${STUN_URLS:?Set the public STUN URL}
       TURN_URLS: ${TURN_URLS:?Set the public TURN URLs}
       TURN_REALM: ${TURN_REALM:-veilink}
       TURN_REST_SECRET: ${TURN_REST_SECRET:?Generate a shared TURN REST secret}

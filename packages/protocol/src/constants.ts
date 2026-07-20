@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 1 as const;
+export const PROTOCOL_VERSION = 2 as const;
 
 export const ROOM_ID_BYTES = 16;
 export const LINK_SECRET_BYTES = 32;
@@ -19,7 +19,7 @@ export const MAX_ROOM_TTL_MS = DEFAULT_ROOM_TTL_MS;
 export const HEARTBEAT_INTERVAL_MS = 15_000;
 export const HEARTBEAT_MISSES_BEFORE_EVICTION = 2;
 export const RECONNECT_GRACE_MS = 30_000;
-export const MODE_SWITCH_TIMEOUT_MS = 30_000;
+export const PEER_CONNECTION_TIMEOUT_MS = 30_000;
 
 export const DEFAULT_MAX_FILE_SIZE_MB = 25;
 export const MIN_MAX_FILE_SIZE_MB = 1;

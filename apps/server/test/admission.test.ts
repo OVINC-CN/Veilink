@@ -13,10 +13,8 @@ describe('AdmissionService', () => {
     const session = store.createRoom({
       roomId: 'AAAAAAAAAAAAAAAAAAAAAA',
       admissionKey: key,
-      mode: 'turn',
       nickname: 'Owner',
       identityPublicKey: Buffer.alloc(32, 1).toString('base64url'),
-      publicIp: '203.0.113.1',
       transportId: 'owner',
       sink: () => undefined,
     })

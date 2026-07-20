@@ -1,4 +1,4 @@
-import type { Member, RoomMode } from '../models'
+import type { Member } from '../models'
 
 export interface IceCredentials {
   urls: string[]
@@ -19,9 +19,7 @@ interface PeerRecord {
 
 export interface PeerMeshOptions {
   localMemberId: string
-  mode: RoomMode
-  stunUrls: string[]
-  turnCredentials?: IceCredentials
+  turnCredentials: IceCredentials
   sendSignal: (targetMemberId: string, payload: PeerSignalPayload) => void
   onData: (sourceMemberId: string, data: string | ArrayBuffer) => void
   onConnectionChange?: (memberId: string, state: RTCPeerConnectionState) => void
@@ -29,21 +27,13 @@ export interface PeerMeshOptions {
 }
 
 function rtcConfiguration(options: PeerMeshOptions): RTCConfiguration {
-  if (options.mode === 'turn') {
-    if (!options.turnCredentials) throw new Error('TURN credentials are required in relay mode')
-    return {
-      iceServers: [{
-        urls: options.turnCredentials.urls,
-        ...(options.turnCredentials.username ? { username: options.turnCredentials.username } : {}),
-        ...(options.turnCredentials.credential ? { credential: options.turnCredentials.credential } : {}),
-      }],
-      iceTransportPolicy: 'relay',
-      bundlePolicy: 'max-bundle',
-    }
-  }
   return {
-    iceServers: options.stunUrls.length > 0 ? [{ urls: options.stunUrls }] : [],
-    iceTransportPolicy: 'all',
+    iceServers: [{
+      urls: options.turnCredentials.urls,
+      ...(options.turnCredentials.username ? { username: options.turnCredentials.username } : {}),
+      ...(options.turnCredentials.credential ? { credential: options.turnCredentials.credential } : {}),
+    }],
+    iceTransportPolicy: 'relay',
     bundlePolicy: 'max-bundle',
   }
 }
@@ -113,13 +103,7 @@ export class PeerMesh {
     return channels.length
   }
 
-  async reconfigure(mode: RoomMode, turnCredentials?: IceCredentials): Promise<void> {
-    this.destroy()
-    this.options = { ...this.options, mode, ...(turnCredentials ? { turnCredentials } : {}) }
-  }
-
   async refreshTurnCredentials(turnCredentials: IceCredentials): Promise<void> {
-    if (this.options.mode !== 'turn') return
     this.options = { ...this.options, turnCredentials }
     for (const [memberId, peer] of this.peers) {
       peer.connection.setConfiguration(rtcConfiguration(this.options))

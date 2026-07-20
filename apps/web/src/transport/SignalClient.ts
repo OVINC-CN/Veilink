@@ -12,7 +12,6 @@ import {
   type MemberId,
   type Nickname,
   type RoomId,
-  type RoomMode,
   type ServerSignalEnvelope,
   type ServerSignalType,
   type TurnCredentials,
@@ -123,7 +122,6 @@ export class SignalClient {
 
   async createRoom(input: {
     nickname: Nickname
-    mode: RoomMode
     admissionKey: Uint8Array
     identityPublicKey: IdentityPublicKey
   }): Promise<SessionConfirmation> {
@@ -135,7 +133,6 @@ export class SignalClient {
       roomId: this.roomId,
       payload: {
         nickname: input.nickname,
-        mode: input.mode,
         admissionVerifier: base64UrlEncode(input.admissionKey) as never,
         identityPublicKey: input.identityPublicKey,
       },
@@ -205,34 +202,21 @@ export class SignalClient {
     return response.payload
   }
 
-  sendRtcDescription(targetMemberId: MemberId, modeVersion: number, generation: number, description: RTCSessionDescriptionInit): void {
+  sendRtcDescription(targetMemberId: MemberId, description: RTCSessionDescriptionInit): void {
     this.send({
       v: PROTOCOL_VERSION,
       type: 'rtc.description',
       roomId: this.roomId,
-      payload: { targetMemberId, modeVersion, generation, description: description as never },
+      payload: { targetMemberId, description: description as never },
     })
   }
 
-  sendRtcCandidate(targetMemberId: MemberId, modeVersion: number, generation: number, candidate: RTCIceCandidateInit): void {
+  sendRtcCandidate(targetMemberId: MemberId, candidate: RTCIceCandidateInit): void {
     this.send({
       v: PROTOCOL_VERSION,
       type: 'rtc.candidate',
       roomId: this.roomId,
-      payload: { targetMemberId, modeVersion, generation, candidate: candidate as never },
-    })
-  }
-
-  requestMode(mode: RoomMode, expectedVersion: number): void {
-    this.send({ v: PROTOCOL_VERSION, type: 'room.mode.request', roomId: this.roomId, payload: { mode, expectedVersion } })
-  }
-
-  acknowledgeMode(version: number, status: 'ready' | 'failed', reason?: string): void {
-    this.send({
-      v: PROTOCOL_VERSION,
-      type: 'room.mode.ack',
-      roomId: this.roomId,
-      payload: { version, status, ...(reason ? { reason } : {}) },
+      payload: { targetMemberId, candidate: candidate as never },
     })
   }
 

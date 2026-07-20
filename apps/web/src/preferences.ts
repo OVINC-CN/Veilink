@@ -2,14 +2,12 @@ export const PREFERENCES_KEY = 'veilink.preferences.v1'
 
 export type Locale = 'zh-CN' | 'en-US'
 export type Theme = 'system' | 'light' | 'dark'
-export type DefaultRoomMode = 'p2p' | 'turn'
 export type SendShortcut = 'enter' | 'mod-enter'
 export type Density = 'comfortable' | 'compact'
 
 export interface Preferences {
   locale: Locale
   theme: Theme
-  defaultRoomMode: DefaultRoomMode
   maxFileSizeMb: number
   sendShortcut: SendShortcut
   showTimestamps: boolean
@@ -26,7 +24,6 @@ export function defaultPreferences(): Preferences {
   return {
     locale: browserLocale(),
     theme: 'system',
-    defaultRoomMode: 'turn',
     maxFileSizeMb: 25,
     sendShortcut: 'enter',
     showTimestamps: true,
@@ -47,9 +44,6 @@ export function sanitizePreferences(value: unknown): Preferences {
   const theme = value.theme === 'light' || value.theme === 'dark' || value.theme === 'system'
     ? value.theme
     : defaults.theme
-  const defaultRoomMode = value.defaultRoomMode === 'p2p' || value.defaultRoomMode === 'turn'
-    ? value.defaultRoomMode
-    : defaults.defaultRoomMode
   const maxFileSizeMb = typeof value.maxFileSizeMb === 'number'
     ? Math.min(256, Math.max(1, Math.round(value.maxFileSizeMb)))
     : defaults.maxFileSizeMb
@@ -64,7 +58,6 @@ export function sanitizePreferences(value: unknown): Preferences {
   return {
     locale,
     theme,
-    defaultRoomMode,
     maxFileSizeMb,
     sendShortcut,
     showTimestamps: value.showTimestamps !== false,

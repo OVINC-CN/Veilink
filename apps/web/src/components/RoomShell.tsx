@@ -1,7 +1,7 @@
 import { LockKey } from '@phosphor-icons/react'
 import { useEffect, useRef } from 'react'
 import { t } from '../i18n'
-import type { ActiveRoom, ChatMessage, RichTextDocument, RoomMode } from '../models'
+import type { ActiveRoom, ChatMessage, RichTextDocument } from '../models'
 import type { Preferences } from '../preferences'
 import { AttachmentPreview } from './AttachmentPreview'
 import { ChatComposer } from './ChatComposer'
@@ -19,7 +19,6 @@ interface RoomShellProps {
   onPreferences: (next: Preferences) => void
   onSend: (document: RichTextDocument) => Promise<void> | void
   onFiles: (files: File[]) => Promise<void> | void
-  onSwitchMode: (mode: RoomMode) => Promise<void> | void
   onLeave: () => void
   onDestroy: () => Promise<void> | void
 }
@@ -42,7 +41,6 @@ export function RoomShell(props: RoomShellProps) {
         room={room}
         preferences={preferences}
         onPreferences={props.onPreferences}
-        onSwitchMode={props.onSwitchMode}
         onLeave={props.onLeave}
         onDestroy={props.onDestroy}
       />
@@ -51,7 +49,6 @@ export function RoomShell(props: RoomShellProps) {
         <section className="message-list" aria-live="polite" aria-label="聊天消息">
           {messages.length === 0 ? <div className="empty-state">{t(preferences.locale, 'noMessages')}</div> : null}
           {messages.map((message) => {
-            const member = room.members.find((candidate) => candidate.id === message.senderId)
             const links = extractLinks(message.document)
             return (
               <article className="message" key={message.id}>
@@ -59,7 +56,6 @@ export function RoomShell(props: RoomShellProps) {
                 <div className="message-body">
                   <header>
                     <strong>{message.senderName}</strong>
-                    {room.mode === 'p2p' && member?.publicIp ? <code>{member.publicIp}</code> : null}
                     {preferences.showTimestamps ? <time dateTime={new Date(message.sentAt).toISOString()}>{formatTime(message.sentAt, preferences.locale)}</time> : null}
                   </header>
                   <RichText document={message.document} />
@@ -81,7 +77,7 @@ export function RoomShell(props: RoomShellProps) {
             onSend={props.onSend}
             onFiles={props.onFiles}
           />
-          <p>{room.mode === 'p2p' ? t(preferences.locale, 'directIpNotice') : t(preferences.locale, 'relayNotice')}</p>
+          <p>{t(preferences.locale, 'relayNotice')}</p>
         </div>
       </main>
     </div>

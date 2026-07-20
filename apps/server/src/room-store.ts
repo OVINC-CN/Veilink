@@ -1,14 +1,9 @@
-import type {
-  PublicMember,
-  RoomEndReason,
-  RoomMode,
-  RoomSnapshot,
-} from '@veilink/protocol'
+import { PROTOCOL_VERSION, type PublicMember, type RoomEndReason, type RoomSnapshot } from '@veilink/protocol'
 
 import { hashResumeToken, randomId, safeEqual, verifyAdmissionProof } from './security.js'
 
 export interface WireEvent {
-  v: 1
+  v: typeof PROTOCOL_VERSION
   type: string
   requestId?: string
   payload: unknown
@@ -22,13 +17,12 @@ export interface RoomSession {
   snapshot: RoomSnapshot
 }
 
-type MemberExitReason = 'left' | 'timeout' | 'disconnected' | 'mode-switch-failed'
+type MemberExitReason = 'left' | 'timeout' | 'disconnected'
 
 interface Member {
   id: string
   nickname: string
   identityPublicKey: string
-  publicIp: string
   joinedAt: number
   connected: boolean
   resumeTokenHash: Buffer
@@ -37,26 +31,14 @@ interface Member {
   disconnectDeadline?: number
 }
 
-interface PendingModeSwitch {
-  target: RoomMode
-  version: number
-  deadline: number
-  requestedBy: string
-  required: Set<string>
-  acknowledged: Set<string>
-}
-
 interface Room {
   id: string
   admissionKey: Buffer
-  mode: RoomMode
-  modeVersion: number
   snapshotVersion: number
   ownerId: string
   createdAt: number
   expiresAt: number
   members: Map<string, Member>
-  pendingMode?: PendingModeSwitch
 }
 
 export type RoomStoreErrorCode =
@@ -64,13 +46,10 @@ export type RoomStoreErrorCode =
   | 'room_not_found'
   | 'room_capacity_reached'
   | 'server_capacity_reached'
-  | 'mode_switching'
   | 'already_in_room'
   | 'member_not_found'
   | 'resume_rejected'
   | 'not_owner'
-  | 'invalid_mode'
-  | 'invalid_mode_version'
   | 'target_not_found'
 
 export class RoomStoreError extends Error {
@@ -85,7 +64,6 @@ export interface RoomStoreOptions {
   maxRooms?: number
   maxMembers?: number
   disconnectGraceMs?: number
-  modeSwitchTimeoutMs?: number
   now?: () => number
 }
 
@@ -96,7 +74,6 @@ export class RoomStore {
   readonly #maxRooms: number
   readonly #maxMembers: number
   readonly #disconnectGraceMs: number
-  readonly #modeSwitchTimeoutMs: number
   readonly #now: () => number
 
   constructor(options: RoomStoreOptions) {
@@ -110,7 +87,6 @@ export class RoomStore {
     this.#maxRooms = options.maxRooms ?? 1_000
     this.#maxMembers = options.maxMembers ?? 8
     this.#disconnectGraceMs = options.disconnectGraceMs ?? 30_000
-    this.#modeSwitchTimeoutMs = options.modeSwitchTimeoutMs ?? 30_000
     this.#now = options.now ?? Date.now
   }
 
@@ -127,23 +103,11 @@ export class RoomStore {
     return () => this.#destroyListeners.delete(listener)
   }
 
-  getRoomMode(roomId: string): { mode: RoomMode; modeVersion: number } | undefined {
-    const room = this.#rooms.get(roomId)
-    return room === undefined ? undefined : { mode: room.mode, modeVersion: room.modeVersion }
-  }
-
-  canIssueTurnCredentials(roomId: string): boolean {
-    const room = this.#rooms.get(roomId)
-    return room?.mode === 'turn' || room?.pendingMode?.target === 'turn'
-  }
-
   createRoom(input: {
     roomId: string
     admissionKey: Uint8Array
-    mode: RoomMode
     nickname: string
     identityPublicKey: string
-    publicIp: string
     transportId: string
     sink: EventSink
   }): RoomSession {
@@ -155,8 +119,6 @@ export class RoomStore {
     const room: Room = {
       id: input.roomId,
       admissionKey: Buffer.from(input.admissionKey),
-      mode: input.mode,
-      modeVersion: 1,
       snapshotVersion: 0,
       ownerId: member.id,
       createdAt: now,
@@ -171,12 +133,10 @@ export class RoomStore {
     roomId: string
     nickname: string
     identityPublicKey: string
-    publicIp: string
     transportId: string
     sink: EventSink
   }): RoomSession {
     const room = this.#getRoom(input.roomId)
-    if (room.pendingMode !== undefined) throw new RoomStoreError('mode_switching')
     if (room.members.size >= this.#maxMembers) throw new RoomStoreError('room_capacity_reached')
     for (const member of room.members.values()) {
       if (member.transportId === input.transportId) throw new RoomStoreError('already_in_room')
@@ -188,7 +148,7 @@ export class RoomStore {
     this.#broadcast(
       room,
       {
-        v: 1,
+        v: PROTOCOL_VERSION,
         type: 'room.member.joined',
         payload: {
           member: this.#publicMember(room, member),
@@ -206,12 +166,10 @@ export class RoomStore {
     memberId: string
     resumeToken: string
     identityPublicKey: string
-    publicIp: string
     transportId: string
     sink: EventSink
   }): RoomSession {
     const room = this.#getRoom(input.roomId)
-    if (room.pendingMode !== undefined) throw new RoomStoreError('mode_switching')
     const member = room.members.get(input.memberId)
     const suppliedHash = hashResumeToken(input.resumeToken)
     if (
@@ -227,7 +185,6 @@ export class RoomStore {
     }
     suppliedHash.fill(0)
 
-    member.publicIp = input.publicIp
     member.transportId = input.transportId
     member.sink = input.sink
     member.connected = true
@@ -274,73 +231,11 @@ export class RoomStore {
     this.#removeMember(room, member.id, 'left')
   }
 
-  requestModeSwitch(
-    roomId: string,
-    memberId: string,
-    transportId: string,
-    target: RoomMode,
-    expectedVersion: number,
-  ): void {
-    const room = this.#getRoom(roomId)
-    this.#getConnectedMember(room, memberId, transportId)
-    if (room.ownerId !== memberId) throw new RoomStoreError('not_owner')
-    if (room.pendingMode !== undefined) throw new RoomStoreError('mode_switching')
-    if (room.mode === target) throw new RoomStoreError('invalid_mode')
-    if (room.modeVersion !== expectedVersion) throw new RoomStoreError('invalid_mode_version')
-
-    const now = this.#now()
-    const required = new Set(
-      [...room.members.values()].filter((member) => member.connected).map((member) => member.id),
-    )
-    room.pendingMode = {
-      target,
-      version: room.modeVersion + 1,
-      deadline: now + this.#modeSwitchTimeoutMs,
-      requestedBy: memberId,
-      required,
-      acknowledged: new Set(),
-    }
-    this.#broadcast(room, {
-      v: 1,
-      type: 'room.mode.pending',
-      payload: {
-        previousMode: room.mode,
-        mode: target,
-        version: room.pendingMode.version,
-        requestedBy: memberId,
-        deadlineAt: room.pendingMode.deadline,
-      },
-    })
-  }
-
-  acknowledgeModeSwitch(
-    roomId: string,
-    memberId: string,
-    transportId: string,
-    version: number,
-    status: 'ready' | 'failed',
-  ): void {
-    const room = this.#getRoom(roomId)
-    this.#getConnectedMember(room, memberId, transportId)
-    const pending = room.pendingMode
-    if (pending === undefined || pending.version !== version || !pending.required.has(memberId)) {
-      throw new RoomStoreError('invalid_mode_version')
-    }
-    if (status === 'failed') {
-      this.#removeMember(room, memberId, 'mode-switch-failed')
-      return
-    }
-    pending.acknowledged.add(memberId)
-    if (pending.acknowledged.size === pending.required.size) this.#commitMode(room)
-  }
-
   forwardRtcDescription(input: {
     roomId: string
     senderId: string
     transportId: string
     targetMemberId: string
-    modeVersion: number
-    generation: number
     description: unknown
   }): void {
     this.#forwardRtcEvent({ ...input, type: 'rtc.description', data: input.description })
@@ -351,8 +246,6 @@ export class RoomStore {
     senderId: string
     transportId: string
     targetMemberId: string
-    modeVersion: number
-    generation: number
     candidate: unknown
   }): void {
     this.#forwardRtcEvent({ ...input, type: 'rtc.candidate', data: input.candidate })
@@ -376,8 +269,6 @@ export class RoomStore {
       .map((member) => this.#publicMember(room, member))
     return {
       roomId: room.id,
-      mode: room.mode,
-      modeVersion: room.modeVersion,
       snapshotVersion: room.snapshotVersion,
       ownerId: room.ownerId,
       members,
@@ -401,30 +292,6 @@ export class RoomStore {
           if (!this.#rooms.has(room.id)) break
         }
       }
-      if (!this.#rooms.has(room.id)) continue
-
-      const pending = room.pendingMode
-      if (pending !== undefined && pending.deadline <= now) {
-        const unacknowledged = [...pending.required].filter(
-          (memberId) => !pending.acknowledged.has(memberId),
-        )
-        for (const memberId of unacknowledged) {
-          const member = room.members.get(memberId)
-          if (member !== undefined) {
-            this.#emit(member, {
-              v: 1,
-              type: 'error',
-              payload: {
-                code: 'mode_timeout',
-                message: 'Mode switch acknowledgement timed out.',
-              },
-            })
-          }
-          this.#removeMember(room, memberId, 'mode-switch-failed')
-          if (!this.#rooms.has(room.id)) break
-        }
-        if (this.#rooms.has(room.id) && room.pendingMode !== undefined) this.#commitMode(room)
-      }
     }
   }
 
@@ -437,26 +304,20 @@ export class RoomStore {
     senderId: string
     transportId: string
     targetMemberId: string
-    modeVersion: number
-    generation: number
     type: 'rtc.description' | 'rtc.candidate'
     data: unknown
   }): void {
     const room = this.#getRoom(input.roomId)
     this.#getConnectedMember(room, input.senderId, input.transportId)
-    if (room.pendingMode !== undefined) throw new RoomStoreError('mode_switching')
-    if (room.modeVersion !== input.modeVersion) throw new RoomStoreError('invalid_mode_version')
     const target = room.members.get(input.targetMemberId)
     if (target?.connected !== true || target.sink === undefined) {
       throw new RoomStoreError('target_not_found')
     }
     this.#emit(target, {
-      v: 1,
+      v: PROTOCOL_VERSION,
       type: input.type,
       payload: {
         fromMemberId: input.senderId,
-        modeVersion: input.modeVersion,
-        generation: input.generation,
         ...(input.type === 'rtc.description'
           ? { description: input.data }
           : { candidate: input.data }),
@@ -482,7 +343,6 @@ export class RoomStore {
     input: {
       nickname: string
       identityPublicKey: string
-      publicIp: string
       transportId: string
       sink: EventSink
     },
@@ -492,7 +352,6 @@ export class RoomStore {
       id: randomId(16),
       nickname: input.nickname,
       identityPublicKey: input.identityPublicKey,
-      publicIp: input.publicIp,
       joinedAt: now,
       connected: true,
       resumeTokenHash: Buffer.alloc(32),
@@ -518,8 +377,6 @@ export class RoomStore {
     if (member === undefined) return
     member.resumeTokenHash.fill(0)
     room.members.delete(memberId)
-    room.pendingMode?.required.delete(memberId)
-    room.pendingMode?.acknowledged.delete(memberId)
 
     if (room.members.size === 0) {
       this.#destroy(room, 'last-member-left')
@@ -538,7 +395,7 @@ export class RoomStore {
     }
     room.snapshotVersion += 1
     this.#broadcast(room, {
-      v: 1,
+      v: PROTOCOL_VERSION,
       type: 'room.member.left',
       payload: { memberId, reason, snapshotVersion: room.snapshotVersion },
     })
@@ -546,52 +403,29 @@ export class RoomStore {
       const newOwner = room.members.get(room.ownerId)
       if (newOwner !== undefined) {
         this.#broadcast(room, {
-          v: 1,
+          v: PROTOCOL_VERSION,
           type: 'room.owner.changed',
           payload: { ownerId: newOwner.id, snapshotVersion: room.snapshotVersion },
         })
       }
     }
 
-    const pending = room.pendingMode
-    if (pending !== undefined && pending.acknowledged.size === pending.required.size) {
-      this.#commitMode(room)
-    } else {
-      this.#broadcastSnapshot(room)
-    }
-  }
-
-  #commitMode(room: Room): void {
-    const pending = room.pendingMode
-    if (pending === undefined) return
-    room.mode = pending.target
-    room.modeVersion = pending.version
-    room.snapshotVersion += 1
-    delete room.pendingMode
-    this.#broadcast(room, {
-      v: 1,
-      type: 'room.mode.changed',
-      payload: { mode: room.mode, version: room.modeVersion },
-    })
     this.#broadcastSnapshot(room)
   }
 
   #destroy(room: Room, reason: RoomEndReason): void {
     if (!this.#rooms.delete(room.id)) return
-    this.#broadcast(room, { v: 1, type: 'room.ended', payload: { reason } })
+    this.#broadcast(room, { v: PROTOCOL_VERSION, type: 'room.ended', payload: { reason } })
     room.admissionKey.fill(0)
     for (const member of room.members.values()) member.resumeTokenHash.fill(0)
     room.members.clear()
-    room.pendingMode?.required.clear()
-    room.pendingMode?.acknowledged.clear()
-    delete room.pendingMode
     for (const listener of this.#destroyListeners) listener(room.id)
   }
 
   #broadcastSnapshot(room: Room, excludedMemberId?: string): void {
     this.#broadcast(
       room,
-      { v: 1, type: 'room.snapshot', payload: this.snapshot(room) },
+      { v: PROTOCOL_VERSION, type: 'room.snapshot', payload: this.snapshot(room) },
       excludedMemberId,
     )
   }
@@ -603,7 +437,6 @@ export class RoomStore {
       identityPublicKey: member.identityPublicKey,
       joinedAt: member.joinedAt,
       isOwner: member.id === room.ownerId,
-      ...(room.mode === 'p2p' ? { publicIp: member.publicIp } : {}),
     } as PublicMember
   }
 

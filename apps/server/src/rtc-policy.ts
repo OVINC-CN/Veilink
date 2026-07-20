@@ -1,5 +1,3 @@
-import type { RoomMode } from '@veilink/protocol'
-
 const CANDIDATE_LINE_PATTERN = /^a=candidate:/u
 const CANDIDATE_TYPE_VALUES = new Set(['host', 'srflx', 'prflx', 'relay'])
 
@@ -33,17 +31,17 @@ function parseCandidateType(candidate: string): string | undefined {
   return tokens[7]
 }
 
-function candidateAllowed(candidate: string, mode: RoomMode): boolean {
+function candidateAllowed(candidate: string): boolean {
   const type = parseCandidateType(candidate)
   if (type === '') return true
   if (type === undefined) return false
-  return mode === 'turn' ? type === 'relay' : type !== 'relay'
+  return type === 'relay'
 }
 
-export function isRtcDescriptionAllowed(sdp: string, mode: RoomMode): boolean {
-  return candidateLines(sdp).every((line) => candidateAllowed(line, mode))
+export function isRtcDescriptionAllowed(sdp: string): boolean {
+  return candidateLines(sdp).every((line) => candidateAllowed(line))
 }
 
-export function isRtcCandidateAllowed(candidate: string, mode: RoomMode): boolean {
-  return candidateAllowed(candidate.trim(), mode)
+export function isRtcCandidateAllowed(candidate: string): boolean {
+  return candidateAllowed(candidate.trim())
 }

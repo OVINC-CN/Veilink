@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   CaretDown,
-  Check,
   Copy,
   DotsThree,
   GearSix,
@@ -11,17 +10,16 @@ import {
   Users,
 } from '@phosphor-icons/react'
 import { t } from '../i18n'
-import type { ActiveRoom, RoomMode } from '../models'
+import type { ActiveRoom } from '../models'
 import type { Preferences } from '../preferences'
 import { Brand } from './Brand'
 
-type Panel = 'members' | 'mode' | 'security' | 'settings' | 'more' | null
+type Panel = 'members' | 'security' | 'settings' | 'more' | null
 
 interface RoomTopBarProps {
   room: ActiveRoom
   preferences: Preferences
   onPreferences: (next: Preferences) => void
-  onSwitchMode: (mode: RoomMode) => Promise<void> | void
   onLeave: () => void
   onDestroy: () => Promise<void> | void
 }
@@ -34,7 +32,7 @@ function formatRemaining(expiresAt: number): string {
   return [hours, minutes, rest].map((value) => String(value).padStart(2, '0')).join(':')
 }
 
-export function RoomTopBar({ room, preferences, onPreferences, onSwitchMode, onLeave, onDestroy }: RoomTopBarProps) {
+export function RoomTopBar({ room, preferences, onPreferences, onLeave, onDestroy }: RoomTopBarProps) {
   const [panel, setPanel] = useState<Panel>(null)
   const [remaining, setRemaining] = useState(() => formatRemaining(room.expiresAt))
   const [copied, setCopied] = useState(false)
@@ -75,7 +73,7 @@ export function RoomTopBar({ room, preferences, onPreferences, onSwitchMode, onL
       <Brand tagline={t(preferences.locale, 'tagline')} />
       <div className="room-summary" aria-label="房间状态">
         <span className="secure-dot" />
-        <strong>{room.mode === 'p2p' ? t(preferences.locale, 'p2p') : t(preferences.locale, 'turn')}</strong>
+        <strong>{t(preferences.locale, 'turn')}</strong>
         <time>{remaining}</time>
       </div>
       <nav className="top-actions" aria-label="房间控制">
@@ -93,36 +91,11 @@ export function RoomTopBar({ room, preferences, onPreferences, onSwitchMode, onL
                     <span className="member-copy">
                       <strong>{member.nickname}{member.id === room.memberId ? '（你）' : ''}</strong>
                       {member.isOwner ? <small>{t(preferences.locale, 'owner')}</small> : null}
-                      {room.mode === 'p2p' && member.publicIp ? <code>{member.publicIp}</code> : null}
                     </span>
                   </li>
                 ))}
               </ul>
-              <p className="popover-note">{room.mode === 'p2p' ? t(preferences.locale, 'directIpNotice') : t(preferences.locale, 'relayNotice')}</p>
-            </section>
-          ) : null}
-        </div>
-
-        <div className="popover-anchor">
-          <button className="top-action mode-action" type="button" aria-expanded={panel === 'mode'} onClick={() => toggle('mode')}>
-            <span className="secure-dot" /><span>{room.mode === 'p2p' ? t(preferences.locale, 'p2p') : t(preferences.locale, 'turn')}</span>
-          </button>
-          {panel === 'mode' ? (
-            <section className="popover mode-popover">
-              <div className="popover-title"><strong>{t(preferences.locale, 'switchMode')}</strong></div>
-              {(['turn', 'p2p'] as const).map((mode) => (
-                <button
-                  className="menu-row"
-                  key={mode}
-                  type="button"
-                  disabled={!isOwner || mode === room.mode}
-                  onClick={() => { setPanel(null); void onSwitchMode(mode) }}
-                >
-                  <span><strong>{mode === 'turn' ? t(preferences.locale, 'turn') : t(preferences.locale, 'p2p')}</strong><small>{mode === 'turn' ? t(preferences.locale, 'relayNotice') : t(preferences.locale, 'directIpNotice')}</small></span>
-                  {mode === room.mode ? <Check weight="bold" /> : null}
-                </button>
-              ))}
-              {!isOwner ? <p className="popover-note">仅房间所有者可以切换全员模式。</p> : null}
+              <p className="popover-note">{t(preferences.locale, 'relayNotice')}</p>
             </section>
           ) : null}
         </div>
@@ -147,7 +120,6 @@ export function RoomTopBar({ room, preferences, onPreferences, onSwitchMode, onL
               <div className="popover-title"><strong>{t(preferences.locale, 'settings')}</strong></div>
               <label>主题<select value={preferences.theme} onChange={(event) => onPreferences({ ...preferences, theme: event.target.value as Preferences['theme'] })}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
               <label>语言<select value={preferences.locale} onChange={(event) => onPreferences({ ...preferences, locale: event.target.value as Preferences['locale'] })}><option value="zh-CN">简体中文</option><option value="en-US">English</option></select></label>
-              <label>默认模式<select value={preferences.defaultRoomMode} onChange={(event) => onPreferences({ ...preferences, defaultRoomMode: event.target.value as Preferences['defaultRoomMode'] })}><option value="turn">TURN 中继</option><option value="p2p">P2P 直连</option></select></label>
               <label>文件上限<input type="number" min="1" max="256" value={preferences.maxFileSizeMb} onChange={(event) => onPreferences({ ...preferences, maxFileSizeMb: Number(event.target.value) })} /><span>MiB</span></label>
               <label>发送快捷键<select value={preferences.sendShortcut} onChange={(event) => onPreferences({ ...preferences, sendShortcut: event.target.value as Preferences['sendShortcut'] })}><option value="enter">Enter</option><option value="mod-enter">⌘/Ctrl + Enter</option></select></label>
               <label>消息密度<select value={preferences.density} onChange={(event) => onPreferences({ ...preferences, density: event.target.value as Preferences['density'] })}><option value="comfortable">舒适</option><option value="compact">紧凑</option></select></label>

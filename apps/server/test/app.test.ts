@@ -26,7 +26,6 @@ describe('Fastify application', () => {
       APP_ORIGIN: 'https://veilink.example',
       WEB_DIST_DIR: '/path/that/does/not/exist',
       TURN_REST_SECRET: 'a-production-grade-turn-secret-value',
-      STUN_URLS: 'stun:turn.example:3478',
       TURN_URLS: 'turn:turn.example:3478?transport=udp',
     })
     context = await buildApp({ config })
@@ -45,7 +44,8 @@ describe('Fastify application', () => {
     })
     expect(publicConfig.statusCode).toBe(200)
     expect(publicConfig.json()).not.toHaveProperty('turnRestSecret')
-    expect(publicConfig.json().ice.turnAvailable).toBe(true)
+    expect(publicConfig.json()).not.toHaveProperty('ice')
+    expect(publicConfig.json().protocolVersion).toBe(2)
   })
 
   it('rejects a cross-origin browser request to guarded endpoints', async () => {
@@ -53,6 +53,8 @@ describe('Fastify application', () => {
       NODE_ENV: 'test',
       APP_ORIGIN: 'https://veilink.example',
       WEB_DIST_DIR: '/path/that/does/not/exist',
+      TURN_REST_SECRET: 'a-production-grade-turn-secret-value',
+      TURN_URLS: 'turn:turn.example:3478?transport=udp',
     })
     context = await buildApp({ config })
     const response = await context.app.inject({
@@ -71,6 +73,8 @@ describe('Fastify application', () => {
       NODE_ENV: 'test',
       APP_ORIGIN: 'https://veilink.example',
       WEB_DIST_DIR: temporaryStaticRoot,
+      TURN_REST_SECRET: 'a-production-grade-turn-secret-value',
+      TURN_URLS: 'turn:turn.example:3478?transport=udp',
     })
     context = await buildApp({ config })
 

@@ -22,10 +22,8 @@ const publicKey = IdentityPublicKeySchema.parse(fixedToken(32, 3));
 const admissionVerifier = AdmissionVerifierSchema.parse(fixedToken(32, 4));
 const requestId = RequestIdSchema.parse("request_123");
 
-const p2pSnapshot = {
+const snapshot = {
   roomId,
-  mode: "p2p" as const,
-  modeVersion: 1,
   snapshotVersion: 1,
   ownerId: memberId,
   members: [
@@ -35,7 +33,6 @@ const p2pSnapshot = {
       identityPublicKey: publicKey,
       joinedAt: 1_000,
       isOwner: true,
-      publicIp: "203.0.113.8",
     },
   ],
   createdAt: 1_000,
@@ -44,18 +41,22 @@ const p2pSnapshot = {
 };
 
 describe("room snapshot invariants", () => {
-  it("accepts P2P snapshots containing the server-observed IP", () => {
-    expect(RoomSnapshotSchema.safeParse(p2pSnapshot).success).toBe(true);
+  it("accepts TURN-only snapshots without member IP addresses", () => {
+    expect(RoomSnapshotSchema.safeParse(snapshot).success).toBe(true);
   });
 
-  it("prevents public IP disclosure in TURN snapshots", () => {
-    expect(RoomSnapshotSchema.safeParse({ ...p2pSnapshot, mode: "turn" }).success).toBe(false);
+  it("rejects snapshots that disclose a member IP address", () => {
+    const disclosed = {
+      ...snapshot,
+      members: [{ ...snapshot.members[0], publicIp: "203.0.113.8" }],
+    };
+    expect(RoomSnapshotSchema.safeParse(disclosed).success).toBe(false);
   });
 
   it("requires exactly one matching owner", () => {
     const invalid = {
-      ...p2pSnapshot,
-      members: [{ ...p2pSnapshot.members[0], isOwner: false }],
+      ...snapshot,
+      members: [{ ...snapshot.members[0], isOwner: false }],
     };
     expect(RoomSnapshotSchema.safeParse(invalid).success).toBe(false);
   });
@@ -64,13 +65,12 @@ describe("room snapshot invariants", () => {
 describe("versioned signaling envelopes", () => {
   it("strictly parses a room creation request", () => {
     const message = {
-      v: 1,
+      v: 2,
       type: "room.create",
       requestId,
       roomId,
       payload: {
         nickname: "  Owner  ",
-        mode: "turn",
         admissionVerifier,
         identityPublicKey: publicKey,
       },
@@ -83,15 +83,37 @@ describe("versioned signaling envelopes", () => {
     }
   });
 
+  it("rejects legacy P2P creation and mode-switch requests", () => {
+    const p2pCreation = {
+      v: 2,
+      type: "room.create",
+      roomId,
+      payload: {
+        nickname: "Owner",
+        mode: "p2p",
+        admissionVerifier,
+        identityPublicKey: publicKey,
+      },
+    };
+    const modeSwitch = {
+      v: 2,
+      type: "room.mode.request",
+      roomId,
+      payload: { mode: "p2p", expectedVersion: 1 },
+    };
+
+    expect(ClientSignalEnvelopeSchema.safeParse(p2pCreation).success).toBe(false);
+    expect(ClientSignalEnvelopeSchema.safeParse(modeSwitch).success).toBe(false);
+  });
+
   it("rejects unknown fields and unsupported protocol versions", () => {
     const message = {
-      v: 2,
+      v: 1,
       type: "room.create",
       requestId,
       roomId,
       payload: {
         nickname: "Owner",
-        mode: "turn",
         admissionVerifier,
         identityPublicKey: publicKey,
         secret: "unexpected",
@@ -103,7 +125,7 @@ describe("versioned signaling envelopes", () => {
 
   it("accepts a bounded server error without requiring a room ID", () => {
     const error = {
-      v: 1,
+      v: 2,
       type: "error",
       requestId,
       payload: { code: "rate_limited", message: "Try again later", retryAfterMs: 1_000 },
@@ -113,13 +135,11 @@ describe("versioned signaling envelopes", () => {
 
   it("rejects SDP beyond the signaling limit", () => {
     const message = {
-      v: 1,
+      v: 2,
       type: "rtc.description",
       roomId,
       payload: {
         targetMemberId: memberId,
-        modeVersion: 1,
-        generation: 0,
         description: { type: "offer", sdp: "x".repeat(128 * 1024 + 1) },
       },
     };

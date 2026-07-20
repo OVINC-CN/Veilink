@@ -13,8 +13,8 @@
 
 - 通过邀请链接及单独分享的 6 位 PIN 加入聊天室。
 - 浏览器本地使用链接密钥和 PIN 派生 E2EE 密钥；读取 URL Fragment 后立即从地址栏移除。
-- 聊天数据通过 WebRTC DataChannel 传输，Fastify 只负责房间成员和 WebRTC 信令。
-- 支持全房间统一的 P2P 直连与强制 TURN 中继。P2P 会向成员显示彼此公网 IP；TURN 模式隐藏成员间的 IP。
+- 聊天数据通过 TURN 中继的 WebRTC DataChannel 传输，Fastify 只负责房间成员、WebRTC 信令和短期中继凭据。
+- 所有 WebRTC 连接都强制通过 TURN，参与者之间不会建立直连或暴露彼此公网 IP。
 - 房间和信令状态仅保存在进程内存中。最后一人断开、到期、房主销毁或应用重启都会销毁聊天室。
 - 支持受限富文本、本地生成的隐私链接卡片，以及受支持附件的内存预览。
 
@@ -22,7 +22,7 @@
 
 项目采用 pnpm workspace：React/Vite 浏览器客户端、Fastify 信令服务器以及共享协议包。生产容器从同一个 Origin 提供前端和 API。应用与 coturn 共享部署密钥，并为客户端签发短期 REST/HMAC TURN 凭据。
 
-系统刻意不包含数据库、缓存服务、对象存储、文件上传接口、服务端聊天历史或可写数据卷。v1 只支持一个应用副本，禁止使用 `docker compose up --scale app=...` 扩容；多个副本无法共享房间状态。应用重启会使全部房间失效。
+系统刻意不包含数据库、缓存服务、对象存储、文件上传接口、服务端聊天历史或可写数据卷。部署只支持一个应用副本，禁止使用 `docker compose up --scale app=...` 扩容；多个副本无法共享房间状态。应用重启会使全部房间失效。
 
 ## 环境要求
 
@@ -117,7 +117,6 @@ docker compose -f docker-compose.yml \
 | `TLS_CERT_FILE`、`TLS_KEY_FILE` | 可选的应用原生 HTTPS PEM 路径 | 必须同时设置或同时留空 |
 | `TRUST_PROXY_CIDRS` | 直接反向代理的 CIDR | 必填、必须精确 |
 | `ROOM_TTL_SECONDS` | 内存聊天室存活时间 | `86400`，不可超过 |
-| `STUN_URLS` | 浏览器使用的 STUN URL，逗号分隔 | 必填 |
 | `TURN_URLS` | 浏览器使用的 TURN URL，逗号分隔 | 必填 |
 | `TURN_REALM` | 应用和 coturn 共享的 Realm | `veilink` |
 | `TURN_REST_SECRET` | 应用和 coturn 共享的 HMAC 密钥 | 必填，使用 32 个随机字节 |
@@ -140,13 +139,13 @@ Veilink 不进行应用级持久化，但普通浏览器和操作系统无法绝
 浏览器端只允许以下两类持久化例外：
 
 1. 用户明确选择下载的文件。
-2. localStorage 中的 `veilink.preferences.v1`：仅包含界面语言、主题、默认房间模式、文件大小限制、发送快捷键、时间显示、密度，以及可选的“记住昵称”开关和值。
+2. localStorage 中的 `veilink.preferences.v1`：仅包含界面语言、主题、文件大小限制、发送快捷键、时间显示、密度，以及可选的“记住昵称”开关和值。
 
 此外，用户点击“复制”会主动把 PIN 或邀请链接交给系统剪贴板。剪贴板历史和云同步不受浏览器控制，可能在 Tab 关闭后继续保存；分享后应手动用无敏感内容覆盖剪贴板。
 
 房间 ID、链接密钥、PIN、派生密钥、指纹、消息、链接、附件、成员地址和重连 Token 不得写入 localStorage、sessionStorage、IndexedDB、Cache API 或 Service Worker Cache。关闭或刷新 Tab 时会清空应用内存并撤销 Blob URL。
 
-E2EE 可以阻止信令服务器和 TURN 服务器读取消息及文件内容，但不会向基础设施运营者隐藏连接元数据，也无法防御已失陷终端、恶意浏览器扩展或被替换的前端 JavaScript。从 P2P 切到 TURN 只能阻止后续 IP 暴露，无法收回其他成员已经看到的地址。
+E2EE 可以阻止信令服务器和 TURN 服务器读取消息及文件内容，但不会向基础设施运营者隐藏连接元数据，也无法防御已失陷终端、恶意浏览器扩展或被替换的前端 JavaScript。强制中继可避免参与者获知彼此公网 IP，但基础设施运营者仍可观察连接元数据。
 
 TURN REST 凭据和已建立的 allocation 无法按房间逐一即时吊销；默认凭据和 allocation 最长有效 10 分钟。房间销毁会立即删除应用内状态，但已有 TURN allocation 仍可能存活至 coturn 超时，且无法读取 E2EE 内容。
 
