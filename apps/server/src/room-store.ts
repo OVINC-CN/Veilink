@@ -35,7 +35,7 @@ interface Room {
   id: string
   admissionKey: Buffer
   snapshotVersion: number
-  ownerId: string
+  ownerId: string | undefined
   createdAt: number
   expiresAt: number
   members: Map<string, Member>
@@ -142,8 +142,10 @@ export class RoomStore {
       if (member.transportId === input.transportId) throw new RoomStoreError('already_in_room')
     }
 
+    const wasVacant = room.members.size === 0
     const member = this.#newMember(input, this.#now())
     room.members.set(member.id, member)
+    if (wasVacant) room.ownerId = member.id
     room.snapshotVersion += 1
     this.#broadcast(
       room,
@@ -260,17 +262,21 @@ export class RoomStore {
 
   snapshotById(roomId: string): RoomSnapshot | undefined {
     const room = this.#rooms.get(roomId)
-    return room === undefined ? undefined : this.snapshot(room)
+    return room === undefined || room.members.size === 0 ? undefined : this.snapshot(room)
   }
 
   snapshot(room: Room): RoomSnapshot {
+    const ownerId = room.ownerId
+    if (room.members.size === 0 || ownerId === undefined || !room.members.has(ownerId)) {
+      throw new Error('Cannot snapshot a room without an active owner')
+    }
     const members = [...room.members.values()]
       .sort((left, right) => left.joinedAt - right.joinedAt || left.id.localeCompare(right.id))
       .map((member) => this.#publicMember(room, member))
     return {
       roomId: room.id,
       snapshotVersion: room.snapshotVersion,
-      ownerId: room.ownerId,
+      ownerId,
       members,
       createdAt: room.createdAt,
       expiresAt: room.expiresAt,
@@ -375,15 +381,16 @@ export class RoomStore {
   #removeMember(room: Room, memberId: string, reason: MemberExitReason): void {
     const member = room.members.get(memberId)
     if (member === undefined) return
+    const ownerChanged = room.ownerId === memberId
     member.resumeTokenHash.fill(0)
     room.members.delete(memberId)
 
     if (room.members.size === 0) {
-      this.#destroy(room, 'last-member-left')
+      room.ownerId = undefined
+      room.snapshotVersion += 1
       return
     }
 
-    const ownerChanged = room.ownerId === memberId
     if (ownerChanged) {
       const replacement = [...room.members.values()].sort(
         (left, right) =>
@@ -400,7 +407,7 @@ export class RoomStore {
       payload: { memberId, reason, snapshotVersion: room.snapshotVersion },
     })
     if (ownerChanged) {
-      const newOwner = room.members.get(room.ownerId)
+      const newOwner = room.ownerId === undefined ? undefined : room.members.get(room.ownerId)
       if (newOwner !== undefined) {
         this.#broadcast(room, {
           v: PROTOCOL_VERSION,

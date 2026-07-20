@@ -42,13 +42,20 @@ describe('RoomStore', () => {
     expect(RoomSnapshotSchema.safeParse(owner.snapshot).success).toBe(true)
   })
 
-  it('destroys a room when its final member leaves', () => {
+  it('keeps a vacant room when its final member leaves', () => {
     const { store, owner } = createHarness()
+    const destroyed: string[] = []
+    store.onDestroyed((roomId) => destroyed.push(roomId))
+
     store.leave(owner.snapshot.roomId, owner.memberId, 'transport-owner')
-    expect(store.size).toBe(0)
+
+    expect(store.size).toBe(1)
+    expect(store.hasRoom(owner.snapshot.roomId)).toBe(true)
+    expect(store.snapshotById(owner.snapshot.roomId)).toBeUndefined()
+    expect(destroyed).toEqual([])
   })
 
-  it('keeps a disconnected member only for the in-memory resume grace period', () => {
+  it('removes a disconnected member after the resume grace period and retains the room until expiry', () => {
     const { store, owner, advance } = createHarness()
     store.disconnect(owner.snapshot.roomId, owner.memberId, 'transport-owner')
     expect(store.size).toBe(1)
@@ -59,6 +66,36 @@ describe('RoomStore', () => {
 
     advance(1)
     store.sweep()
+    expect(store.size).toBe(1)
+    expect(store.snapshotById(owner.snapshot.roomId)).toBeUndefined()
+
+    advance(58_999)
+    store.sweep()
+    expect(store.size).toBe(1)
+
+    advance(1)
+    store.sweep()
+    expect(store.size).toBe(0)
+  })
+
+  it('makes the first member to join a vacant room its new owner', () => {
+    const { store, owner } = createHarness()
+    store.leave(owner.snapshot.roomId, owner.memberId, 'transport-owner')
+
+    const successor = store.joinRoom({
+      roomId: owner.snapshot.roomId,
+      nickname: 'Successor',
+      identityPublicKey: IDENTITY_B,
+      transportId: 'transport-successor',
+      sink: () => undefined,
+    })
+
+    expect(successor.snapshot.ownerId).toBe(successor.memberId)
+    expect(successor.snapshot.members).toHaveLength(1)
+    expect(successor.snapshot.members[0]?.isOwner).toBe(true)
+    expect(RoomSnapshotSchema.safeParse(successor.snapshot).success).toBe(true)
+
+    store.destroyByOwner(owner.snapshot.roomId, successor.memberId, 'transport-successor')
     expect(store.size).toBe(0)
   })
 

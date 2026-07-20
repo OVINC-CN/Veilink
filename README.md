@@ -22,8 +22,9 @@ tab remains connected.
   room membership, WebRTC signalling, and short-lived relay credentials.
 - Forces every WebRTC connection through TURN so participants never establish
   direct connections or expose their public IPs to one another.
-- Keeps rooms and signalling state only in process memory. The last disconnect,
-  room expiry, manual destruction, or an application restart destroys the room.
+- Keeps rooms and signalling state only in process memory. Vacant rooms remain
+  available until expiry; owner destruction or an application restart also
+  destroys the room.
 - Renders constrained structured rich text, privacy-preserving local link cards,
   and in-memory previews for supported attachments.
 
