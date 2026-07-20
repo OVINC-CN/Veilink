@@ -50,7 +50,7 @@ describe('Fastify application', () => {
     expect(publicConfig.statusCode).toBe(200)
     expect(publicConfig.json()).not.toHaveProperty('turnRestSecret')
     expect(publicConfig.json()).not.toHaveProperty('ice')
-    expect(publicConfig.json().protocolVersion).toBe(3)
+    expect(publicConfig.json().protocolVersion).toBe(4)
   })
 
   it('rejects a cross-origin browser request to guarded endpoints', async () => {

@@ -43,6 +43,8 @@ describe('preference persistence boundary', () => {
       showTimestamps: false,
       density: 'compact',
       rememberNickname: true,
+      mentionNotifications: false,
+      notificationPromptDismissed: false,
       nickname: 'Mira',
     })
     expect(persisted).toEqual(saved)
