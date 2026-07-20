@@ -334,10 +334,13 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
       <div className="composer-body">
         <EditorContent editor={editor} />
         {!editor || editor.isEmpty ? <span className="composer-placeholder">{placeholder}</span> : null}
-        <button className="send-button" type="button" disabled={disabled || !editor || editor.isEmpty} onClick={() => void submit()}>
-          <PaperPlaneTilt weight="fill" />
-          <span>{sendLabel}</span>
-        </button>
+        <div className="composer-actions">
+          <span className="composer-shortcut" aria-hidden="true"><kbd>{preferences.sendShortcut === 'enter' ? '↵' : '⌘↵'}</kbd></span>
+          <button className="send-button" type="button" disabled={disabled || !editor || editor.isEmpty} onClick={() => void submit()}>
+            <PaperPlaneTilt weight="fill" />
+            <span>{sendLabel}</span>
+          </button>
+        </div>
       </div>
     </div>
   )

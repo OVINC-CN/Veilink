@@ -1,5 +1,5 @@
-import { LockKey, SpinnerGap } from '@phosphor-icons/react'
-import { useLayoutEffect, useRef } from 'react'
+import { ArrowDown, LockKey, ShieldCheck, SpinnerGap } from '@phosphor-icons/react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { t } from '../i18n'
 import type { ActiveRoom, ChatMessage, RichTextDocument } from '../models'
 import type { Preferences } from '../preferences'
@@ -33,6 +33,7 @@ export function RoomShell(props: RoomShellProps) {
   const messageList = useRef<HTMLElement>(null)
   const nearBottom = useRef(true)
   const previousLastMessageId = useRef<string | undefined>(undefined)
+  const [unreadCount, setUnreadCount] = useState(0)
   const lastMessage = messages.at(-1)
   const lastMessageId = lastMessage?.id
   const lastMessageSenderId = lastMessage?.senderId
@@ -40,11 +41,15 @@ export function RoomShell(props: RoomShellProps) {
   useLayoutEffect(() => {
     if (!lastMessageId || previousLastMessageId.current === lastMessageId) return
     previousLastMessageId.current = lastMessageId
-    if (lastMessageSenderId !== room.memberId && !nearBottom.current) return
+    if (lastMessageSenderId !== room.memberId && !nearBottom.current) {
+      setUnreadCount((count) => count + 1)
+      return
+    }
     const frame = window.requestAnimationFrame(() => {
       const list = messageList.current
       if (!list) return
       nearBottom.current = true
+      setUnreadCount(0)
       list.scrollTo({ top: list.scrollHeight, behavior: 'auto' })
     })
     return () => window.cancelAnimationFrame(frame)
@@ -54,6 +59,15 @@ export function RoomShell(props: RoomShellProps) {
     const list = messageList.current
     if (!list) return
     nearBottom.current = list.scrollHeight - list.scrollTop - list.clientHeight <= 80
+    if (nearBottom.current) setUnreadCount(0)
+  }
+
+  const scrollToLatest = (): void => {
+    const list = messageList.current
+    if (!list) return
+    nearBottom.current = true
+    setUnreadCount(0)
+    list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' })
   }
 
   return (
@@ -67,26 +81,41 @@ export function RoomShell(props: RoomShellProps) {
       />
       <main className="chat-main">
         <div className="encryption-notice"><LockKey weight="fill" /><span>{t(preferences.locale, 'encryptedNotice')}</span></div>
-        <section ref={messageList} className="message-list" aria-live="polite" aria-label="聊天消息" onScroll={trackScrollPosition}>
-          {messages.length === 0 ? <div className="empty-state">{t(preferences.locale, 'noMessages')}</div> : null}
+        <section ref={messageList} className="message-list" aria-live="polite" aria-label={preferences.locale === 'zh-CN' ? '聊天消息' : 'Chat messages'} onScroll={trackScrollPosition}>
+          {messages.length === 0 ? (
+            <div className="empty-state">
+              <span className="empty-state-icon"><ShieldCheck weight="duotone" /></span>
+              <strong>{preferences.locale === 'zh-CN' ? '这是一段全新的私密会话' : 'A fresh private conversation'}</strong>
+              <span>{t(preferences.locale, 'noMessages')}</span>
+            </div>
+          ) : null}
           {messages.map((message) => {
             const links = extractLinks(message.document)
+            const isSelf = message.senderId === room.memberId
             return (
-              <article className="message" key={message.id}>
+              <article className={`message${isSelf ? ' message-self' : ''}`} key={message.id}>
                 <MemberAvatar seed={message.senderIdentityPublicKey} className="message-avatar" />
                 <div className="message-body">
                   <header>
-                    <strong>{message.senderName}</strong>
+                    <strong>{isSelf ? (preferences.locale === 'zh-CN' ? '你' : 'You') : message.senderName}</strong>
                     {preferences.showTimestamps ? <time dateTime={new Date(message.sentAt).toISOString()}>{formatTime(message.sentAt, preferences.locale)}</time> : null}
                   </header>
-                  <RichText document={message.document} />
-                  {links.map((href) => <LocalLinkCard href={href} key={href} />)}
-                  {message.attachments.map((attachment) => <AttachmentPreview attachment={attachment} key={attachment.id} />)}
+                  <div className="message-content">
+                    <RichText document={message.document} />
+                    {links.map((href) => <LocalLinkCard href={href} key={href} />)}
+                    {message.attachments.map((attachment) => <AttachmentPreview attachment={attachment} key={attachment.id} />)}
+                  </div>
                 </div>
               </article>
             )
           })}
         </section>
+        {unreadCount > 0 ? (
+          <button className="jump-to-latest" type="button" onClick={scrollToLatest}>
+            <ArrowDown weight="bold" />
+            <span>{preferences.locale === 'zh-CN' ? `${unreadCount} 条新消息` : `${unreadCount} new ${unreadCount === 1 ? 'message' : 'messages'}`}</span>
+          </button>
+        ) : null}
         <div className="composer-region">
           {props.error ? <div className="room-error" role="alert">{props.error}</div> : null}
           {props.connectionState === 'connecting' ? (

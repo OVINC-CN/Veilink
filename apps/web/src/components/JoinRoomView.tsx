@@ -64,15 +64,18 @@ export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, ava
 
   return (
     <>
-      <h1>{t(preferences.locale, 'join')}</h1>
-      <p>{hasLinkSecret ? t(preferences.locale, 'joinDescription') : t(preferences.locale, 'linkMissing')}</p>
+      <div className="entry-copy">
+        <span className="entry-eyebrow"><ShieldCheck weight="fill" />{preferences.locale === 'zh-CN' ? '受保护的邀请' : 'Protected invitation'}</span>
+        <h1>{t(preferences.locale, 'join')}</h1>
+        <p>{hasLinkSecret ? t(preferences.locale, 'joinDescription') : t(preferences.locale, 'linkMissing')}</p>
+      </div>
       <form className="entry-form" onSubmit={submit}>
         <div className="avatar-picker">
           {avatarSeed ? <MemberAvatar seed={avatarSeed} label={t(preferences.locale, 'randomAvatar')} className="avatar-preview" /> : <span className="avatar-skeleton" aria-hidden="true" />}
           <div><strong>{t(preferences.locale, 'randomAvatar')}</strong><small>{t(preferences.locale, 'avatarEphemeral')}</small></div>
           <button type="button" className="avatar-refresh" disabled={busy || avatarBusy} onClick={() => void onRegenerateAvatar()}><ArrowsClockwise />{avatarBusy ? t(preferences.locale, 'avatarGenerating') : t(preferences.locale, 'changeAvatar')}</button>
         </div>
-        <label>{t(preferences.locale, 'nickname')}<input autoComplete="off" autoCapitalize="words" spellCheck="false" maxLength={64} type="text" value={nickname} placeholder={t(preferences.locale, 'nicknamePlaceholder')} onChange={(event) => setNickname(event.target.value)} required /></label>
+        <label>{t(preferences.locale, 'nickname')}<input autoFocus autoComplete="off" autoCapitalize="words" spellCheck="false" maxLength={64} type="text" value={nickname} placeholder={t(preferences.locale, 'nicknamePlaceholder')} onChange={(event) => setNickname(event.target.value)} required /></label>
         <fieldset className="pin-fieldset">
           <legend>{t(preferences.locale, 'pin')}</legend>
           <div className="pin-inputs">
@@ -100,7 +103,7 @@ export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, ava
         {error ? <div className="form-error" role="alert">{error}</div> : null}
         <button className="primary-button" type="submit" disabled={busy || avatarBusy || !avatarSeed || !hasLinkSecret || !nickname.trim() || !/^\d{6}$/u.test(pin)}><Key weight="fill" />{busy ? t(preferences.locale, 'connecting') : t(preferences.locale, 'join')}</button>
       </form>
-      <div className="privacy-callout entry-security"><ShieldCheck /><span>PIN 和链接密钥在本机派生 E2EE 密钥；服务器只接收域隔离的认证材料。</span></div>
+      <div className="privacy-callout entry-security"><ShieldCheck weight="fill" /><span>{preferences.locale === 'zh-CN' ? 'PIN 和链接密钥仅在本机派生 E2EE 密钥；服务器只接收域隔离的认证材料。' : 'The PIN and link secret derive E2EE keys only on this device; the server receives domain-separated authentication material.'}</span></div>
     </>
   )
 }

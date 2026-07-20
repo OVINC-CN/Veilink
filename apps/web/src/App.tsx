@@ -1153,9 +1153,6 @@ export default function App() {
     const current = roomRef.current
     const runtime = runtimeRef.current
     if (!current || !runtime) return
-    const suffix = current.fingerprint.replaceAll(' ', '').slice(-4)
-    const confirmation = window.prompt(`输入密钥指纹末 4 位 ${suffix} 以销毁聊天室`)
-    if (confirmation?.toUpperCase() !== suffix) return
     runtime.signal.destroyRoom()
   }
 

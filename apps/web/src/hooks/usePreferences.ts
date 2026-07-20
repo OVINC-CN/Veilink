@@ -13,6 +13,10 @@ export function usePreferences(): [Preferences, (next: Preferences) => void] {
     applyTheme(preferences.theme)
   }, [preferences.theme])
 
+  useEffect(() => {
+    document.documentElement.lang = preferences.locale
+  }, [preferences.locale])
+
   const setPreferences = (next: Preferences): void => {
     setPreferencesState(savePreferences(next))
   }
