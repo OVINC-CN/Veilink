@@ -288,7 +288,7 @@ button { color: inherit; }
 .composer-toolbar button:disabled { cursor: default; opacity: .38; }
 .composer-toolbar svg { width: 18px; height: 18px; }
 .composer-popover { position: absolute; z-index: 50; bottom: calc(100% + 9px); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow); }
-.emoji-menu { right: 10px; display: grid; grid-template-columns: repeat(4, 38px); gap: 3px; padding: 8px; }
+.emoji-menu { bottom: auto; display: grid; grid-template-columns: repeat(4, 38px); gap: 3px; padding: 8px; }
 .emoji-menu button { display: grid; width: 38px; height: 38px; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; font-size: 20px; cursor: pointer; }
 .emoji-menu button:hover { background: var(--surface-hover); }
 .link-popover { left: 10px; display: grid; width: min(360px, calc(100vw - 46px)); gap: 9px; padding: 12px; }

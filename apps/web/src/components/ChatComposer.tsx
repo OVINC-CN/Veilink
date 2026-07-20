@@ -14,7 +14,7 @@ import {
   TextItalic,
   X,
 } from '@phosphor-icons/react'
-import { useEffect, useRef, useState, type PointerEvent, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent, type ReactNode } from 'react'
 import type { RichTextDocument } from '../models'
 import type { Preferences } from '../preferences'
 
@@ -60,9 +60,13 @@ function ToolbarButton({ label, active, disabled, expanded, children, onActivate
 export function ChatComposer({ connectionState, preferences, placeholder, sendLabel, onSend, onFiles }: ChatComposerProps) {
   const disabled = connectionState !== 'ready'
   const root = useRef<HTMLDivElement>(null)
+  const toolbar = useRef<HTMLDivElement>(null)
+  const emojiAnchor = useRef<HTMLDivElement>(null)
+  const emojiMenu = useRef<HTMLDivElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const savedSelection = useRef<{ from: number; to: number } | undefined>(undefined)
   const [emojiOpen, setEmojiOpen] = useState(false)
+  const [emojiPosition, setEmojiPosition] = useState<{ left: number; top: number }>()
   const [linkOpen, setLinkOpen] = useState(false)
   const [linkValue, setLinkValue] = useState('https://')
   const [linkError, setLinkError] = useState<string>()
@@ -126,6 +130,46 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
       document.removeEventListener('keydown', escape)
     }
   }, [editor])
+
+  useLayoutEffect(() => {
+    if (!emojiOpen) {
+      setEmojiPosition(undefined)
+      return
+    }
+
+    const rootNode = root.current
+    const toolbarNode = toolbar.current
+    const anchorNode = emojiAnchor.current
+    const menuNode = emojiMenu.current
+    if (!rootNode || !anchorNode || !menuNode) return
+
+    const updatePosition = (): void => {
+      const rootRect = rootNode.getBoundingClientRect()
+      const anchorRect = anchorNode.getBoundingClientRect()
+      const menuRect = menuNode.getBoundingClientRect()
+      const edgeGap = 10
+      const preferredLeft = anchorRect.left - rootRect.left + (anchorRect.width - menuRect.width) / 2
+      const maxLeft = Math.max(edgeGap, rootRect.width - menuRect.width - edgeGap)
+      const nextPosition = {
+        left: Math.round(Math.min(Math.max(preferredLeft, edgeGap), maxLeft)),
+        top: Math.round(anchorRect.top - rootRect.top - menuRect.height - 9),
+      }
+      setEmojiPosition((current) => current?.left === nextPosition.left && current.top === nextPosition.top ? current : nextPosition)
+    }
+
+    updatePosition()
+    toolbarNode?.addEventListener('scroll', updatePosition, { passive: true })
+    window.addEventListener('resize', updatePosition)
+    const resizeObserver = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(updatePosition)
+    resizeObserver?.observe(rootNode)
+    resizeObserver?.observe(anchorNode)
+
+    return () => {
+      toolbarNode?.removeEventListener('scroll', updatePosition)
+      window.removeEventListener('resize', updatePosition)
+      resizeObserver?.disconnect()
+    }
+  }, [emojiOpen])
 
   const submit = async (): Promise<void> => {
     if (!editor || editor.isEmpty || disabled) return
@@ -204,7 +248,7 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
 
   return (
     <div className={`composer-shell${disabled ? ' is-disabled' : ''}`} ref={root} aria-busy={disabled}>
-      <div className="composer-toolbar" aria-label={preferences.locale === 'zh-CN' ? '文本格式' : 'Text formatting'}>
+      <div ref={toolbar} className="composer-toolbar" aria-label={preferences.locale === 'zh-CN' ? '文本格式' : 'Text formatting'}>
         <div className="toolbar-group">
           <ToolbarButton label={preferences.locale === 'zh-CN' ? '粗体' : 'Bold'} disabled={commandDisabled(Boolean(editor?.can().chain().focus().toggleBold().run()))} active={Boolean(editor?.isActive('bold'))} onActivate={() => editor?.chain().focus().toggleBold().run()}><TextB /></ToolbarButton>
           <ToolbarButton label={preferences.locale === 'zh-CN' ? '斜体' : 'Italic'} disabled={commandDisabled(Boolean(editor?.can().chain().focus().toggleItalic().run()))} active={Boolean(editor?.isActive('italic'))} onActivate={() => editor?.chain().focus().toggleItalic().run()}><TextItalic /></ToolbarButton>
@@ -220,7 +264,7 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
         </div>
         <span className="toolbar-divider" aria-hidden="true" />
         <div className="toolbar-group">
-          <div className="toolbar-popover-anchor">
+          <div ref={emojiAnchor} className="toolbar-popover-anchor">
             <ToolbarButton label="Emoji" disabled={disabled || !editor} expanded={emojiOpen} onActivate={toggleEmoji}><Smiley /></ToolbarButton>
           </div>
           <ToolbarButton label={preferences.locale === 'zh-CN' ? '添加附件' : 'Add attachment'} disabled={disabled} onActivate={() => fileInput.current?.click()}><Paperclip /></ToolbarButton>
@@ -247,7 +291,13 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
         </div>
       ) : null}
       {emojiOpen ? (
-        <div className="composer-popover emoji-menu" role="menu" aria-label="Emoji">
+        <div
+          ref={emojiMenu}
+          className="composer-popover emoji-menu"
+          role="menu"
+          aria-label="Emoji"
+          style={emojiPosition ?? { visibility: 'hidden' }}
+        >
           {['😀', '😂', '🥰', '👍', '👏', '🎉', '🔒', '👀'].map((emoji) => <button key={emoji} type="button" role="menuitem" onClick={() => insertEmoji(emoji)}>{emoji}</button>)}
         </div>
       ) : null}
