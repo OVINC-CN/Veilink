@@ -12,8 +12,10 @@
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
     "@tiptap/extension-link": "^2.26.1",
+    "@tiptap/extension-mention": "^2.26.1",
     "@tiptap/react": "^2.26.1",
     "@tiptap/starter-kit": "^2.26.1",
+    "@tiptap/suggestion": "^2.26.1",
     "@veilink/protocol": "workspace:*",
     "file-type": "^21.0.0",
     "libsodium-wrappers-sumo": "0.7.15",

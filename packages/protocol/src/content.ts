@@ -96,6 +96,7 @@ export type InlineNode =
   | { type: "text"; text: string; marks?: RichTextMark[] }
   | { type: "hardBreak" }
   | { type: "emoji"; attrs: { name: string; unicode: string } }
+  | { type: "mention"; attrs: { id: z.infer<typeof MemberIdSchema>; label: z.infer<typeof NicknameSchema> } }
   | { type: "attachment"; attrs: { attachmentId: z.infer<typeof AttachmentIdSchema> } };
 
 const TextNodeSchema = z
@@ -112,6 +113,12 @@ const EmojiNodeSchema = z
     attrs: z.object({ name: z.string().min(1).max(64), unicode: z.string().min(1).max(32) }).strict(),
   })
   .strict();
+export const MentionNodeSchema = z
+  .object({
+    type: z.literal("mention"),
+    attrs: z.object({ id: MemberIdSchema, label: NicknameSchema }).strict(),
+  })
+  .strict();
 const AttachmentNodeSchema = z
   .object({
     type: z.literal("attachment"),
@@ -124,6 +131,7 @@ export const InlineNodeSchema: z.ZodType<InlineNode, z.ZodTypeDef, unknown> = z.
     TextNodeSchema,
     HardBreakNodeSchema,
     EmojiNodeSchema,
+    MentionNodeSchema,
     AttachmentNodeSchema,
   ]),
 );
@@ -253,6 +261,12 @@ function preflightRichText(input: unknown): Omit<RichTextStats, "jsonBytes"> | n
       const unicode = (node.attrs as Record<string, unknown>).unicode;
       if (typeof unicode === "string") {
         visibleBytes += encoder.encode(unicode).byteLength;
+      }
+    }
+    if (node.type === "mention" && typeof node.attrs === "object" && node.attrs !== null) {
+      const label = (node.attrs as Record<string, unknown>).label;
+      if (typeof label === "string") {
+        visibleBytes += encoder.encode(`@${label}`).byteLength;
       }
     }
     if (node.type === "attachment") {

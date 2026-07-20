@@ -16,6 +16,7 @@ function nodeText(node: RichNode): string {
   if (node.type === 'text') return node.text ?? ''
   if (node.type === 'hardBreak') return ' '
   if (node.type === 'emoji' && typeof node.attrs?.unicode === 'string') return node.attrs.unicode
+  if (node.type === 'mention' && typeof node.attrs?.label === 'string') return `@${node.attrs.label}`
   const separator = node.type === 'doc' || node.type === 'bulletList' || node.type === 'orderedList' || node.type === 'listItem' || node.type === 'blockquote' ? ' ' : ''
   return (node.content ?? []).map(nodeText).join(separator)
 }

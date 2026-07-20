@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 3 as const;
+export const PROTOCOL_VERSION = 4 as const;
 
 export const ROOM_ID_BYTES = 16;
 export const LINK_SECRET_BYTES = 32;

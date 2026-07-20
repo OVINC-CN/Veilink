@@ -41,6 +41,7 @@ import type { DerivedKeys, SessionIdentity } from './crypto/types'
 import { usePreferences } from './hooks/usePreferences'
 import { bytesToBase64Url, randomId } from './lib/encoding'
 import type { ActiveRoom, AttachmentView, ChatMessage, Member, RichTextDocument } from './models'
+import { documentMentionsMember, notifyMention } from './mentionNotifications'
 import { validateMedia } from './mediaValidation'
 import { PeerMesh, type IceCredentials, type PeerSignalPayload } from './transport/PeerMesh'
 import { SignalClient, type SessionConfirmation } from './transport/SignalClient'
@@ -653,6 +654,7 @@ export default function App() {
     const runtime = runtimeRef.current
     if (!runtime) return
     if (payload.type === 'rich-text') {
+      const document = payload.document as RichTextDocument
       updateMessages((current) => [...current, {
         id: `${sender.id}:${messageId}`,
         messageId,
@@ -660,10 +662,14 @@ export default function App() {
         senderName: sender.nickname,
         senderIdentityPublicKey: sender.identityPublicKey,
         sentAt,
-        document: payload.document as RichTextDocument,
+        document,
         attachments: [],
         replyTo: payload.replyTo,
       }])
+      const currentMemberId = roomRef.current?.memberId
+      if (currentMemberId && documentMentionsMember(document, currentMemberId)) {
+        notifyMention(preferencesRef.current)
+      }
       return
     }
     if (payload.type === 'attachment-offer') {

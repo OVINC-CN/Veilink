@@ -13,6 +13,8 @@ export interface Preferences {
   showTimestamps: boolean
   density: Density
   rememberNickname: boolean
+  mentionNotifications: boolean
+  notificationPromptDismissed: boolean
   nickname?: string
 }
 
@@ -29,6 +31,8 @@ export function defaultPreferences(): Preferences {
     showTimestamps: true,
     density: 'comfortable',
     rememberNickname: false,
+    mentionNotifications: false,
+    notificationPromptDismissed: false,
   }
 }
 
@@ -63,6 +67,8 @@ export function sanitizePreferences(value: unknown): Preferences {
     showTimestamps: value.showTimestamps !== false,
     density,
     rememberNickname,
+    mentionNotifications: value.mentionNotifications === true,
+    notificationPromptDismissed: value.notificationPromptDismissed === true,
     ...(rememberNickname && typeof value.nickname === 'string' && value.nickname.length <= 64
       ? { nickname: value.nickname }
       : {}),

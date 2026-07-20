@@ -1,7 +1,9 @@
 import { isSafeHttpUrl, type ReplyReference } from '@veilink/protocol'
-import { EditorContent, useEditor } from '@tiptap/react'
+import { EditorContent, ReactRenderer, useEditor } from '@tiptap/react'
 import Link from '@tiptap/extension-link'
+import Mention, { type MentionNodeAttrs } from '@tiptap/extension-mention'
 import StarterKit from '@tiptap/starter-kit'
+import type { SuggestionKeyDownProps, SuggestionProps } from '@tiptap/suggestion'
 import {
   ArrowBendUpLeft,
   Code,
@@ -23,16 +25,20 @@ import {
   type PointerEvent,
   type ReactNode,
 } from 'react'
-import type { RichTextDocument } from '../models'
-import type { Preferences } from '../preferences'
+import type { Member, RichTextDocument } from '../models'
+import type { Locale, Preferences } from '../preferences'
 import { t } from '../i18n'
+import { MentionMenu, type MentionMenuHandle, type MentionMenuProps } from './MentionMenu'
 import { formatReplyExcerpt } from './replyUtils'
+import { prepareDocumentForWire } from './richTextUtils'
 
 interface ChatComposerProps {
   connectionState: 'connecting' | 'ready'
   preferences: Preferences
   placeholder: string
   sendLabel: string
+  members: Member[]
+  currentMemberId: string
   replyTo?: ReplyReference
   onCancelReply: () => void
   onReplyConsumed: (replyTo: ReplyReference) => void
@@ -85,7 +91,7 @@ function ToolbarButton({ label, active, disabled, expanded, children, onActivate
   )
 }
 
-export function ChatComposer({ connectionState, preferences, placeholder, sendLabel, replyTo, onCancelReply, onReplyConsumed, onSend, onFiles }: ChatComposerProps) {
+export function ChatComposer({ connectionState, preferences, placeholder, sendLabel, members, currentMemberId, replyTo, onCancelReply, onReplyConsumed, onSend, onFiles }: ChatComposerProps) {
   const disabled = connectionState !== 'ready'
   const root = useRef<HTMLDivElement>(null)
   const toolbar = useRef<HTMLDivElement>(null)
@@ -93,15 +99,151 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
   const emojiMenu = useRef<HTMLDivElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const savedSelection = useRef<{ from: number; to: number } | undefined>(undefined)
+  const membersRef = useRef(members)
+  const localeRef = useRef<Locale>(preferences.locale)
+  const mentionOpenRef = useRef(false)
   const [emojiOpen, setEmojiOpen] = useState(false)
   const [emojiPosition, setEmojiPosition] = useState<{ left: number; top: number }>()
   const [linkOpen, setLinkOpen] = useState(false)
   const [linkValue, setLinkValue] = useState('https://')
   const [linkError, setLinkError] = useState<string>()
+  membersRef.current = members
+  localeRef.current = preferences.locale
+
+  const setMentionMenuOpen = (open: boolean): void => {
+    mentionOpenRef.current = open
+  }
+
+  const mentionExtension = Mention.configure({
+    HTMLAttributes: { class: 'mention-node' },
+    deleteTriggerWithBackspace: true,
+    renderText: ({ node }) => `@${String(node.attrs.label ?? node.attrs.id ?? '')}`,
+    renderHTML: ({ node, options }) => ['span', options.HTMLAttributes, `@${String(node.attrs.label ?? node.attrs.id ?? '')}`],
+    suggestion: {
+      char: '@',
+      allowedPrefixes: [' '],
+      items: ({ query }) => {
+        const normalizedQuery = query.normalize('NFC').toLocaleLowerCase(localeRef.current)
+        return membersRef.current
+          .filter((member) => member.id !== currentMemberId && member.nickname.normalize('NFC').toLocaleLowerCase(localeRef.current).includes(normalizedQuery))
+          .sort((left, right) => Number(right.isOwner) - Number(left.isOwner) || left.joinedAt - right.joinedAt)
+          .slice(0, 8)
+      },
+      render: () => {
+        let renderer: ReactRenderer<MentionMenuHandle, MentionMenuProps> | undefined
+        let latestProps: SuggestionProps<Member, MentionNodeAttrs> | undefined
+        let positionFrame: number | undefined
+        let dismissed = false
+
+        const updatePosition = (): void => {
+          if (dismissed || !renderer || !latestProps?.clientRect) return
+          const anchor = latestProps.clientRect()
+          const host = renderer.element as HTMLElement
+          if (!anchor) {
+            host.style.visibility = 'hidden'
+            return
+          }
+          const rect = host.getBoundingClientRect()
+          const width = rect.width || 248
+          const height = rect.height || 64
+          const gap = 8
+          const edge = 8
+          const left = Math.min(Math.max(anchor.left, edge), Math.max(edge, window.innerWidth - width - edge))
+          const above = anchor.top - height - gap
+          const top = above >= edge ? above : Math.min(anchor.bottom + gap, window.innerHeight - height - edge)
+          host.style.left = `${Math.round(left)}px`
+          host.style.top = `${Math.round(Math.max(edge, top))}px`
+          host.style.visibility = 'visible'
+        }
+
+        const schedulePosition = (): void => {
+          if (positionFrame !== undefined) window.cancelAnimationFrame(positionFrame)
+          positionFrame = window.requestAnimationFrame(() => {
+            positionFrame = undefined
+            updatePosition()
+          })
+        }
+
+        const observePosition = (): void => {
+          window.addEventListener('resize', schedulePosition)
+          document.addEventListener('scroll', schedulePosition, true)
+          document.addEventListener('pointerdown', dismissOutside)
+        }
+
+        const stopObservingPosition = (): void => {
+          window.removeEventListener('resize', schedulePosition)
+          document.removeEventListener('scroll', schedulePosition, true)
+          document.removeEventListener('pointerdown', dismissOutside)
+          if (positionFrame !== undefined) window.cancelAnimationFrame(positionFrame)
+          positionFrame = undefined
+        }
+
+        const hideMenu = (): void => {
+          dismissed = true
+          const editorElement = latestProps?.editor.view.dom
+          if (renderer) (renderer.element as HTMLElement).style.visibility = 'hidden'
+          editorElement?.setAttribute('aria-expanded', 'false')
+          editorElement?.removeAttribute('aria-controls')
+          setMentionMenuOpen(false)
+        }
+
+        function dismissOutside(event: globalThis.PointerEvent): void {
+          const target = event.target as Node
+          if (renderer?.element.contains(target) || latestProps?.editor.view.dom.contains(target)) return
+          hideMenu()
+        }
+
+        return {
+          onStart: (props: SuggestionProps<Member, MentionNodeAttrs>) => {
+            latestProps = props
+            renderer = new ReactRenderer<MentionMenuHandle, MentionMenuProps>(MentionMenu, {
+              editor: props.editor,
+              props: { ...props, locale: localeRef.current },
+              className: 'mention-menu-host',
+            })
+            renderer.element.id = `mention-menu-${renderer.id}`
+            document.body.appendChild(renderer.element)
+            props.editor.view.dom.setAttribute('aria-autocomplete', 'list')
+            props.editor.view.dom.setAttribute('aria-haspopup', 'listbox')
+            props.editor.view.dom.setAttribute('aria-expanded', 'true')
+            props.editor.view.dom.setAttribute('aria-controls', renderer.element.id)
+            setMentionMenuOpen(true)
+            observePosition()
+            schedulePosition()
+          },
+          onUpdate: (props: SuggestionProps<Member, MentionNodeAttrs>) => {
+            latestProps = props
+            renderer?.updateProps({ ...props, locale: localeRef.current })
+            if (!dismissed) schedulePosition()
+          },
+          onKeyDown: (props: SuggestionKeyDownProps) => {
+            if (props.event.key === 'Escape') {
+              props.event.preventDefault()
+              hideMenu()
+              return true
+            }
+            return dismissed ? false : renderer?.ref?.onKeyDown(props.event) ?? false
+          },
+          onExit: () => {
+            stopObservingPosition()
+            const editorElement = latestProps?.editor.view.dom
+            editorElement?.setAttribute('aria-expanded', 'false')
+            editorElement?.removeAttribute('aria-controls')
+            renderer?.element.remove()
+            renderer?.destroy()
+            renderer = undefined
+            latestProps = undefined
+            setMentionMenuOpen(false)
+          },
+        }
+      },
+    },
+  })
   const editor = useEditor({
     extensions: [
       StarterKit.configure({ heading: { levels: [1, 2, 3] } }),
       Link.configure({ openOnClick: false, autolink: true, linkOnPaste: true }),
+      mentionExtension,
     ],
     content: '',
     editable: !disabled,
@@ -118,6 +260,7 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
       },
       handleKeyDown: (view, event) => {
         if (event.isComposing || view.composing || event.keyCode === 229) return false
+        if (mentionOpenRef.current && ['Enter', 'Tab', 'ArrowUp', 'ArrowDown', 'Escape'].includes(event.key)) return false
         const modifier = event.metaKey || event.ctrlKey
         const shouldSend = preferences.sendShortcut === 'enter'
           ? event.key === 'Enter' && !event.shiftKey
@@ -155,6 +298,7 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
     }
     const escape = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
+      if (event.defaultPrevented || mentionOpenRef.current) return
       const popoverWasOpen = emojiOpen || linkOpen
       setEmojiOpen(false)
       setLinkOpen(false)
@@ -215,7 +359,7 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
 
   const submit = async (): Promise<void> => {
     if (!editor || editor.isEmpty || disabled) return
-    const document = editor.getJSON() as RichTextDocument
+    const document = prepareDocumentForWire(editor.getJSON() as RichTextDocument)
     try {
       await onSend(document, replyTo)
       editor.commands.clearContent(true)

@@ -5,6 +5,7 @@ import {
   Copy,
   DotsThree,
   GearSix,
+  Bell,
   ShieldCheck,
   SignOut,
   Trash,
@@ -15,6 +16,7 @@ import {
 import { t } from '../i18n'
 import type { ActiveRoom } from '../models'
 import type { Preferences } from '../preferences'
+import { mentionNotificationAvailability, requestMentionNotificationPermission } from '../mentionNotifications'
 import { Brand } from './Brand'
 import { MemberAvatar } from './MemberAvatar'
 
@@ -42,6 +44,7 @@ export function RoomTopBar({ room, preferences, onPreferences, onLeave, onDestro
   const [copied, setCopied] = useState(false)
   const [destroyOpen, setDestroyOpen] = useState(false)
   const [destroyConfirmation, setDestroyConfirmation] = useState('')
+  const [requestingNotifications, setRequestingNotifications] = useState(false)
   const root = useRef<HTMLElement>(null)
   const moreButton = useRef<HTMLButtonElement>(null)
   const destroyDialog = useRef<HTMLElement>(null)
@@ -50,6 +53,7 @@ export function RoomTopBar({ room, preferences, onPreferences, onLeave, onDestro
   const zh = preferences.locale === 'zh-CN'
   const fingerprintSuffix = room.fingerprint.replaceAll(' ', '').slice(-4).toUpperCase()
   const destroyValid = destroyConfirmation.trim().toUpperCase() === fingerprintSuffix
+  const notificationAvailability = mentionNotificationAvailability()
 
   useEffect(() => {
     const timer = window.setInterval(() => setRemaining(formatRemaining(room.expiresAt)), 1000)
@@ -132,6 +136,23 @@ export function RoomTopBar({ room, preferences, onPreferences, onLeave, onDestro
     void onDestroy()
   }
 
+  const changeMentionNotifications = async (enabled: boolean): Promise<void> => {
+    if (!enabled) {
+      onPreferences({ ...preferences, mentionNotifications: false, notificationPromptDismissed: true })
+      return
+    }
+    setRequestingNotifications(true)
+    const permission = notificationAvailability === 'granted'
+      ? 'granted'
+      : await requestMentionNotificationPermission()
+    onPreferences({
+      ...preferences,
+      mentionNotifications: permission === 'granted',
+      notificationPromptDismissed: true,
+    })
+    setRequestingNotifications(false)
+  }
+
   return (
     <>
     <header className="topbar" ref={root}>
@@ -190,6 +211,19 @@ export function RoomTopBar({ room, preferences, onPreferences, onLeave, onDestro
               <label>{zh ? '发送快捷键' : 'Send shortcut'}<select value={preferences.sendShortcut} onChange={(event) => onPreferences({ ...preferences, sendShortcut: event.target.value as Preferences['sendShortcut'] })}><option value="enter">Enter</option><option value="mod-enter">⌘/Ctrl + Enter</option></select></label>
               <label>{zh ? '消息密度' : 'Message density'}<select value={preferences.density} onChange={(event) => onPreferences({ ...preferences, density: event.target.value as Preferences['density'] })}><option value="comfortable">{zh ? '舒适' : 'Comfortable'}</option><option value="compact">{zh ? '紧凑' : 'Compact'}</option></select></label>
               <label className="checkbox-row"><span>{zh ? '显示时间' : 'Show timestamps'}</span><input type="checkbox" checked={preferences.showTimestamps} onChange={(event) => onPreferences({ ...preferences, showTimestamps: event.target.checked })} /></label>
+              <label className="checkbox-row notification-setting">
+                <span className="setting-copy">
+                  <span><Bell />{t(preferences.locale, 'mentionNotifications')}</span>
+                  {notificationAvailability === 'denied' ? <small>{t(preferences.locale, 'notificationBlocked')}</small> : null}
+                  {notificationAvailability === 'unsupported' ? <small>{t(preferences.locale, 'notificationUnsupported')}</small> : null}
+                </span>
+                <input
+                  type="checkbox"
+                  checked={preferences.mentionNotifications && notificationAvailability === 'granted'}
+                  disabled={requestingNotifications || notificationAvailability === 'denied' || notificationAvailability === 'unsupported'}
+                  onChange={(event) => void changeMentionNotifications(event.target.checked)}
+                />
+              </label>
               <label className="checkbox-row"><span>{zh ? '记住昵称' : 'Remember nickname'}</span><input type="checkbox" checked={preferences.rememberNickname} onChange={(event) => onPreferences({ ...preferences, rememberNickname: event.target.checked, ...(event.target.checked && self ? { nickname: self.nickname } : { nickname: undefined }) })} /></label>
             </section>
           ) : null}

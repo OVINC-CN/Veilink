@@ -25,6 +25,10 @@ function applyMarks(content: ReactNode, marks: RichMark[] | undefined, key: stri
 function renderNode(node: RichNode, key: string): ReactNode {
   if (node.type === 'text') return applyMarks(node.text ?? '', node.marks, key)
   if (node.type === 'hardBreak') return <br key={key} />
+  if (node.type === 'mention') {
+    const label = typeof node.attrs?.label === 'string' ? node.attrs.label : ''
+    return <span className="mention-node" key={key} aria-label={`@${label}`}>@{label}</span>
+  }
   const children = node.content?.map((child, index) => renderNode(child, `${key}-${index}`)) ?? null
 
   switch (node.type) {
