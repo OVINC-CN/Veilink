@@ -12,6 +12,7 @@ interface JoinRoomViewProps {
   busy: boolean
   avatarSeed?: string
   avatarBusy: boolean
+  restoring?: boolean
   error?: string
   joinAttempt?: JoinAttempt
   initialNickname?: string
@@ -244,11 +245,15 @@ function JoinProgress({ attempt, locale }: { attempt: JoinAttempt; locale: 'zh-C
   )
 }
 
-export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, avatarBusy, error, joinAttempt, initialNickname, initialPin, onRegenerateAvatar, onJoin, onEnter }: JoinRoomViewProps) {
+export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, avatarBusy, restoring = false, error, joinAttempt, initialNickname, initialPin, onRegenerateAvatar, onJoin, onEnter }: JoinRoomViewProps) {
   const [nickname, setNickname] = useState(initialNickname ?? (preferences.rememberNickname ? preferences.nickname ?? '' : ''))
   const [digits, setDigits] = useState<string[]>(() => Array.from({ length: 6 }, (_, index) => initialPin?.[index] ?? ''))
   const inputs = useRef<Array<HTMLInputElement | null>>([])
-  const pin = digits.join('')
+  const resolvedNickname = initialNickname ?? nickname
+  const resolvedDigits = /^\d{6}$/u.test(initialPin ?? '')
+    ? Array.from({ length: 6 }, (_, index) => initialPin?.[index] ?? '')
+    : digits
+  const pin = resolvedDigits.join('')
   const ready = joinAttempt?.finishedAt !== undefined && !joinAttempt.failure
   const locked = busy || ready
   const submit = (event: FormEvent): void => {
@@ -302,7 +307,9 @@ export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, ava
       <div className="entry-copy">
         <span className="entry-eyebrow"><ShieldCheck weight="fill" />{preferences.locale === 'zh-CN' ? '受保护的邀请' : 'Protected invitation'}</span>
         <h1>{t(preferences.locale, 'join')}</h1>
-        <p>{hasLinkSecret ? t(preferences.locale, 'joinDescription') : t(preferences.locale, 'linkMissing')}</p>
+        <p>{restoring
+          ? (preferences.locale === 'zh-CN' ? '正在恢复会话密钥并重新建立成员连接。' : 'Restoring session keys and re-establishing member connections.')
+          : hasLinkSecret ? t(preferences.locale, 'joinDescription') : t(preferences.locale, 'linkMissing')}</p>
       </div>
       <form className="entry-form" onSubmit={submit}>
         <div className="avatar-picker">
@@ -310,11 +317,11 @@ export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, ava
           <div><strong>{t(preferences.locale, 'randomAvatar')}</strong><small>{t(preferences.locale, 'avatarEphemeral')}</small></div>
           <button type="button" className="avatar-refresh" disabled={locked || avatarBusy} onClick={() => void onRegenerateAvatar()}><ArrowsClockwise />{avatarBusy ? t(preferences.locale, 'avatarGenerating') : t(preferences.locale, 'changeAvatar')}</button>
         </div>
-        <label>{t(preferences.locale, 'nickname')}<input autoFocus autoComplete="off" autoCapitalize="words" spellCheck="false" maxLength={64} type="text" value={nickname} placeholder={t(preferences.locale, 'nicknamePlaceholder')} disabled={locked} onChange={(event) => setNickname(event.target.value)} required /></label>
+        <label>{t(preferences.locale, 'nickname')}<input autoFocus autoComplete="off" autoCapitalize="words" spellCheck="false" maxLength={64} type="text" value={resolvedNickname} placeholder={t(preferences.locale, 'nicknamePlaceholder')} disabled={locked} onChange={(event) => setNickname(event.target.value)} required /></label>
         <fieldset className="pin-fieldset" disabled={locked}>
           <legend>{t(preferences.locale, 'pin')}</legend>
           <div className="pin-inputs">
-            {digits.map((digit, index) => (
+            {resolvedDigits.map((digit, index) => (
               <input
                 key={index}
                 ref={(element) => { inputs.current[index] = element }}
@@ -337,7 +344,7 @@ export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, ava
         </fieldset>
         {joinAttempt ? <JoinProgress attempt={joinAttempt} locale={preferences.locale} /> : null}
         {error && !joinAttempt?.failure ? <div className="form-error" role="alert">{error}</div> : null}
-        <button className="primary-button" type="submit" disabled={!ready && (busy || avatarBusy || !avatarSeed || !hasLinkSecret || !nickname.trim() || !/^\d{6}$/u.test(pin))}>
+        <button className="primary-button" type="submit" disabled={!ready && (busy || avatarBusy || !avatarSeed || !hasLinkSecret || !resolvedNickname.trim() || !/^\d{6}$/u.test(pin))}>
           {ready ? <ArrowRight weight="bold" /> : <Key weight="fill" />}
           {ready ? t(preferences.locale, 'enter') : busy ? t(preferences.locale, 'connecting') : joinAttempt?.failure ? (preferences.locale === 'zh-CN' ? '重试加入' : 'Retry join') : t(preferences.locale, 'join')}
         </button>

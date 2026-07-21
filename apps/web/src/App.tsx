@@ -394,7 +394,7 @@ export default function App() {
   })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
-  const [joinAttempt, setJoinAttempt] = useState<JoinAttempt>()
+  const [joinAttempt, setJoinAttempt] = useState<JoinAttempt | undefined>(() => stage === 'recovering' ? createJoinAttempt() : undefined)
   const [room, setRoom] = useState<ActiveRoom>()
   const roomRef = useRef<ActiveRoom | undefined>(undefined)
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -1226,7 +1226,6 @@ export default function App() {
   useEffect(() => {
     if (stage !== 'recovering' || recoveryAttemptedRef.current) return
     recoveryAttemptedRef.current = true
-    setJoinAttempt(createJoinAttempt())
     let cancelled = false
     let signal: SignalClient | undefined
     let identity: SessionIdentity | undefined
@@ -1681,19 +1680,6 @@ export default function App() {
     )
   }
 
-  if (stage === 'recovering') {
-    return (
-      <EntryShell preferences={preferences} onPreferences={setPreferences}>
-        <div className="recovery-view" role="status" aria-live="polite">
-          <span className="recovery-symbol"><SpinnerGap /></span>
-          <span className="entry-eyebrow"><ShieldCheck weight="fill" />{preferences.locale === 'zh-CN' ? '标签页级安全恢复' : 'Tab-scoped secure recovery'}</span>
-          <h1>{preferences.locale === 'zh-CN' ? '正在回到对话' : 'Returning to your conversation'}</h1>
-          <p>{preferences.locale === 'zh-CN' ? '正在恢复加密身份并重新建立 Cloudflare TURN 中继。' : 'Restoring your encrypted identity and re-establishing Cloudflare TURN relays.'}</p>
-        </div>
-      </EntryShell>
-    )
-  }
-
   if (stage === 'room' && room) {
     return (
       <Suspense fallback={(
@@ -1713,7 +1699,7 @@ export default function App() {
   return (
     <EntryShell preferences={preferences} onPreferences={setPreferences}>
       {stage === 'create' ? <CreateRoomView preferences={preferences} busy={busy} avatarSeed={entryIdentityPublicKey} avatarBusy={entryIdentityBusy} creationPasswordRequired={roomCreationPasswordRequired} error={error} onRegenerateAvatar={regenerateEntryIdentity} onCreate={createRoom} /> : null}
-      {stage === 'join' ? <JoinRoomView preferences={preferences} hasLinkSecret={Boolean(linkSecret)} busy={busy} avatarSeed={entryIdentityPublicKey ?? (joinAttempt?.finishedAt !== undefined && !joinAttempt.failure ? room?.members.find((member) => member.id === room.memberId)?.identityPublicKey : undefined)} avatarBusy={entryIdentityBusy} error={error} joinAttempt={joinAttempt} initialNickname={room?.members.find((member) => member.id === room.memberId)?.nickname} initialPin={room?.pin} onRegenerateAvatar={regenerateEntryIdentity} onJoin={joinRoom} onEnter={() => setStage('room')} /> : null}
+      {stage === 'join' || stage === 'recovering' ? <JoinRoomView preferences={preferences} hasLinkSecret={Boolean(linkSecret)} busy={busy || stage === 'recovering'} restoring={stage === 'recovering'} avatarSeed={entryIdentityPublicKey ?? room?.members.find((member) => member.id === room.memberId)?.identityPublicKey} avatarBusy={entryIdentityBusy} error={error} joinAttempt={joinAttempt} initialNickname={room?.members.find((member) => member.id === room.memberId)?.nickname} initialPin={room?.pin} onRegenerateAvatar={regenerateEntryIdentity} onJoin={joinRoom} onEnter={() => setStage('room')} /> : null}
       {stage === 'created' && createdDetails ? <RoomCreatedView pin={createdDetails.pin} invitation={createdDetails.invitation} preferences={preferences} onContinue={() => { setCreatedDetails(undefined); setStage('room') }} /> : null}
     </EntryShell>
   )
