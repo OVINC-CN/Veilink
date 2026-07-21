@@ -1255,6 +1255,7 @@ button.message-reply-reference:hover { border-color: var(--accent); background: 
   position: relative;
   display: flex;
   overflow: visible;
+  align-items: stretch;
   border: 1px solid var(--border-strong);
   border-radius: 13px;
   background: var(--surface-solid);
