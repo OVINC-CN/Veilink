@@ -8,22 +8,20 @@ system's light or dark appearance by default.
 
 ## Security and transport model
 
-- Messages and files travel only over peer-to-peer WebRTC DataChannels.
-- STUN may be used for address discovery. STUN does not relay chat or file data.
-- TURN URLs, relay ICE candidates, and SDP containing relay candidates are
-  rejected on both the Go signalling server and the browser client.
-- After a DataChannel opens, the browser checks the selected ICE candidate pair
-  through WebRTC stats. Data is enabled only for `host`, `srflx`, or `prflx`
-  pairs. If a direct path cannot be proven, the peer connection fails closed.
+- Messages and files travel over WebRTC DataChannels forced through Cloudflare
+  Realtime TURN. Direct and STUN-discovered paths are rejected.
+- The Go service exchanges its long-lived Cloudflare TURN key for short-lived
+  browser credentials; the long-lived key is never exposed to clients.
+- The Go signalling service and browser accept only `relay` ICE candidates and
+  SDP containing no candidates or relay candidates.
 - The Go server carries room metadata, admission challenges, WebRTC signalling,
   and short-lived resume leases. It never receives plaintext messages or files.
 - Message and file payloads remain end-to-end encrypted with keys derived in the
   browser from the invitation secret.
 
-Pure P2P has an explicit availability trade-off: participants behind restrictive
-or symmetric NATs may be unable to connect. Veilink does not fall back to a
-relay. Direct P2P also exposes participant network addresses to one another and
-to their network infrastructure.
+Cloudflare relays encrypted WebRTC packets and can observe network and traffic
+metadata, but the additional application encryption prevents it from reading
+message or file contents. TURN bandwidth usage grows with the number of members.
 
 ## Refresh recovery
 
@@ -47,13 +45,13 @@ page.
 ## Architecture
 
 ```text
-Browser A  <-- encrypted WebRTC DataChannel, direct only -->  Browser B
-    |                                                         |
-    +------ WSS signalling and short-lived room state --------+
-                              |
-                       Go signalling server
-                              |
-                            Redis
+Browser A  <-- encrypted WebRTC -->  Cloudflare TURN  <-- encrypted WebRTC -->  Browser B
+    |                                                                            |
+    +---------------- WSS signalling and short-lived room state -----------------+
+                                         |
+                                  Go signalling server
+                                         |
+                                       Redis
 ```
 
 - `apps/web`: React and Vite client
@@ -95,7 +93,10 @@ example secret or hostname.
 | `REDIS_URL` | Authenticated Redis URL; both `redis://` and `rediss://` are supported |
 | `REDIS_KEY_PREFIX` | Namespace for short-lived room state |
 | `STATE_HMAC_SECRET` | Independent secret used to pseudonymize abuse-control IP keys; at least 32 characters |
-| `STUN_URLS` | Comma-separated `stun:` discovery endpoints; TURN is rejected |
+| `CLOUDFLARE_TURN_KEY_ID` | Cloudflare Realtime TURN key identifier |
+| `CLOUDFLARE_TURN_API_TOKEN` | Server-only token used to issue short-lived TURN credentials |
+| `TURN_CREDENTIAL_TTL_SECONDS` | Short-lived credential lifetime, default 90,000 seconds |
+| `ROOM_CREATION_PASSWORD` | Optional shared password for creating rooms; empty allows public creation |
 | `TRUST_PROXY_CIDRS` | Explicit CIDRs for the direct reverse-proxy hop |
 | `RECONNECT_GRACE_SECONDS` | Refresh/reconnect lease, default 30 seconds |
 | `ROOM_TTL_SECONDS` | Room metadata lifetime, maximum 86,400 seconds |
@@ -109,6 +110,12 @@ headers only from a controlled direct hop. Disable or irreversibly anonymize
 reverse-proxy access logs because room URLs and source IPs are sensitive
 metadata.
 
+The optional room creation password is a deployment-level authorization secret.
+It is not stored in Redis and is distinct from the six-digit invitation PIN and
+the invitation secret used to derive end-to-end encryption keys. Changing it
+does not affect existing rooms or joining an existing invitation. When enabled,
+serve the application over HTTPS so the password is sent only over WSS.
+
 ## Container deployment
 
 ```bash
@@ -118,8 +125,8 @@ docker compose --env-file .env up -d --build
 
 The image uses a statically linked Go binary in a non-root distroless runtime.
 Compose drops Linux capabilities, enables `no-new-privileges`, uses a read-only
-root filesystem, publishes the app on loopback by default, and contains no TURN
-service or relay port exposure.
+root filesystem and publishes the app on loopback by default. TURN is provided
+by Cloudflare Realtime, so the deployment does not expose local relay ports.
 
 Terminate TLS at a hardened reverse proxy or configure both `TLS_CERT_FILE` and
 `TLS_KEY_FILE`. WebRTC and browser cryptography require a secure context outside
@@ -131,6 +138,8 @@ localhost.
   metadata. Configure TTL monitoring; prefer `rediss://` on untrusted networks.
 - Rotate `STATE_HMAC_SECRET` as a coordinated deployment; rotation resets IP
   pseudonyms used by abuse controls.
+- Monitor Cloudflare TURN availability, credential issuance, and relay bandwidth
+  charges. Cloudflare Realtime TURN is not hosted on its China network.
 - Patch Go, Node build tooling, base images, and dependencies regularly.
 - A compromised endpoint, frontend bundle, browser extension, or invitation
   secret defeats end-to-end confidentiality. Verify production asset integrity

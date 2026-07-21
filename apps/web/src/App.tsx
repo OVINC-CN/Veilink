@@ -23,6 +23,7 @@ import {
   type ReplyReference,
   type RoomSnapshot,
   type ServerSignalEnvelope,
+  type TurnCredentials,
 } from '@veilink/protocol'
 import { CreateRoomView } from './components/CreateRoomView'
 import { EntryShell } from './components/EntryShell'
@@ -66,7 +67,7 @@ interface PublicConfig {
   limits: { maxMembers: number; maxRoomTtlMs: number; roomTtlMs: number; maxFileSizeMb: number }
   heartbeatIntervalMs: number
   disconnectGraceMs: number
-  iceServers: RTCIceServer[]
+  roomCreationPasswordRequired: boolean
 }
 
 type Stage = 'create' | 'join' | 'created' | 'recovering' | 'room'
@@ -82,6 +83,7 @@ const MAX_PEER_BYTES_PER_SECOND = 16 * 1024 * 1024
 const MAX_PEER_FRAME_VIOLATIONS = 3
 const PEER_FRAME_VIOLATION_WINDOW_MS = 10_000
 const INCOMING_TRANSFER_IDLE_TIMEOUT_MS = 2 * 60_000
+const TURN_REFRESH_RETRY_MS = 30_000
 
 interface PeerRateWindow {
   startedAt: number
@@ -118,6 +120,8 @@ interface SessionRuntime {
   transferEpoch: number
   unsubscribe: () => void
   resumeToken: string
+  turnCredentialsExpiresAt: number
+  turnRefreshTimer?: number
 }
 
 interface PendingJoin {
@@ -127,7 +131,6 @@ interface PendingJoin {
   signal: SignalClient
   keys: DerivedKeys
   challenge: Awaited<ReturnType<SignalClient['beginJoin']>>
-  iceServers: RTCIceServer[]
 }
 
 function routeRoomId(): string | undefined {
@@ -175,15 +178,7 @@ async function loadPublicConfig(): Promise<PublicConfig> {
   if (value.protocolVersion !== PROTOCOL_VERSION) {
     throw new Error('服务器协议版本不受支持')
   }
-  if (!Array.isArray(value.iceServers) || value.iceServers.length > 8) {
-    throw new Error('服务器返回了无效的 STUN 配置')
-  }
-  for (const server of value.iceServers) {
-    const urls = Array.isArray(server.urls) ? server.urls : [server.urls]
-    if (urls.length === 0 || urls.some((url) => typeof url !== 'string' || !url.startsWith('stun:') || /\s/u.test(url))) {
-      throw new Error('服务器返回了非 STUN 的 ICE 配置')
-    }
-  }
+  if (typeof value.roomCreationPasswordRequired !== 'boolean') throw new Error('服务器返回了无效的创建权限配置')
   return value
 }
 
@@ -320,6 +315,7 @@ export default function App() {
   const [createdDetails, setCreatedDetails] = useState<{ pin: string; invitation: string }>()
   const [entryIdentityPublicKey, setEntryIdentityPublicKey] = useState<string>()
   const [entryIdentityBusy, setEntryIdentityBusy] = useState(false)
+  const [roomCreationPasswordRequired, setRoomCreationPasswordRequired] = useState(false)
 
   const discardEntryIdentity = useCallback((): void => {
     entryIdentityGenerationRef.current += 1
@@ -362,6 +358,17 @@ export default function App() {
   useEffect(() => {
     preferencesRef.current = preferences
   }, [preferences])
+
+  useEffect(() => {
+    if (stage !== 'create') return
+    let cancelled = false
+    void loadPublicConfig().then((config) => {
+      if (!cancelled) setRoomCreationPasswordRequired(config.roomCreationPasswordRequired)
+    }).catch((caught: unknown) => {
+      if (!cancelled) setError(caught instanceof Error ? caught.message : '无法读取服务器配置')
+    })
+    return () => { cancelled = true }
+  }, [stage])
 
   useEffect(() => {
     if (
@@ -536,6 +543,7 @@ export default function App() {
     if (runtime) {
       runtime.unsubscribe()
       clearPeerConnectionTimers(runtime)
+      if (runtime.turnRefreshTimer !== undefined) window.clearTimeout(runtime.turnRefreshTimer)
       runtime.mesh.destroy()
       cancelTransfers(runtime)
       if (sendLeave) runtime.signal.leave()
@@ -590,6 +598,45 @@ export default function App() {
       discardEntryIdentity()
     }
   }, [discardEntryIdentity])
+
+  const expireTurnCredentials = (runtime: SessionRuntime): void => {
+    if (runtimeRef.current !== runtime) return
+    stopRuntime(true)
+    clearRecovery()
+    window.history.replaceState(window.history.state, '', '/')
+    initialRoomId.current = undefined
+    setError('Cloudflare TURN 凭证已过期，连接已安全结束。')
+    setStage('create')
+  }
+
+  const scheduleTurnRefresh = (runtime: SessionRuntime, credentials: TurnCredentials): void => {
+    if (runtime.turnRefreshTimer !== undefined) window.clearTimeout(runtime.turnRefreshTimer)
+    runtime.turnCredentialsExpiresAt = credentials.expiresAt
+    const remaining = Math.max(0, credentials.expiresAt - Date.now())
+    const refreshLead = Math.min(15 * 60_000, Math.max(60_000, Math.floor(remaining / 3)))
+    const delay = Math.max(30_000, remaining - refreshLead)
+    const refresh = (): void => {
+      runtime.turnRefreshTimer = undefined
+      void (async () => {
+        try {
+          const refreshed = await runtime.signal.requestTurnCredentials()
+          await runtime.mesh.refreshIceServers(refreshed.iceServers)
+          if (runtimeRef.current !== runtime) return
+          setError(undefined)
+          scheduleTurnRefresh(runtime, refreshed)
+        } catch {
+          if (runtimeRef.current !== runtime) return
+          if (Date.now() >= runtime.turnCredentialsExpiresAt) {
+            expireTurnCredentials(runtime)
+            return
+          }
+          setError('Cloudflare TURN 凭证刷新失败，正在自动重试。')
+          runtime.turnRefreshTimer = window.setTimeout(refresh, TURN_REFRESH_RETRY_MS)
+        }
+      })()
+    }
+    runtime.turnRefreshTimer = window.setTimeout(refresh, delay)
+  }
 
   const processData = async (sourceMemberId: string, raw: string | ArrayBuffer): Promise<void> => {
     const runtime = runtimeRef.current
@@ -798,14 +845,14 @@ export default function App() {
     keys: DerivedKeys,
     secret: string,
     pin: string | undefined,
-    iceServers: RTCIceServer[],
     initialReplayCounters: ReadonlyMap<string, number> = new Map(),
   ): Promise<ActiveRoom> => {
+    const turnCredentials = await signal.requestTurnCredentials()
     const initialRoom = activeRoomFromSnapshot(confirmation.snapshot, confirmation.selfMemberId, keys, secret, pin)
     const runtime = {} as SessionRuntime
     const mesh = new PeerMesh({
       localMemberId: initialRoom.memberId,
-      iceServers,
+      iceServers: turnCredentials.iceServers,
       sendSignal: (targetMemberId, payload) => {
         if (payload.description) signal.sendRtcDescription(targetMemberId as never, payload.description)
         if (payload.candidate) signal.sendRtcCandidate(targetMemberId as never, payload.candidate)
@@ -867,12 +914,14 @@ export default function App() {
       transferEpoch: 0,
       unsubscribe,
       resumeToken: confirmation.resumeToken,
+      turnCredentialsExpiresAt: turnCredentials.expiresAt,
     } satisfies SessionRuntime)
     runtimeRef.current = runtime
     updateRoom(initialRoom)
     if (!await persistCurrentRecovery()) throw new Error('浏览器无法保存安全刷新检查点')
     mesh.syncMembers(initialRoom.members)
     armRoomConnectionTimers(runtime, initialRoom.members)
+    scheduleTurnRefresh(runtime, turnCredentials)
     return initialRoom
   }
 
@@ -885,6 +934,7 @@ export default function App() {
     let signal: SignalClient | undefined
     let identity: SessionIdentity | undefined
     let keys: DerivedKeys | undefined
+    let resumed = false
 
     void (async () => {
       const roomId = initialRoomId.current
@@ -900,9 +950,10 @@ export default function App() {
         resumeToken: bundle.resumeToken,
         identityPublicKey: IdentityPublicKeySchema.parse(bundle.identity.publicKey),
       })
+      resumed = true
       if (cancelled) throw new Error('恢复已取消')
       setLinkSecret(bundle.linkSecret)
-      await setupRuntime(confirmation, signal, identity, keys, bundle.linkSecret, bundle.pin, publicConfig.iceServers, restoreReplayCounters(bundle))
+      await setupRuntime(confirmation, signal, identity, keys, bundle.linkSecret, bundle.pin, restoreReplayCounters(bundle))
       signal = undefined
       identity = undefined
       keys = undefined
@@ -914,9 +965,10 @@ export default function App() {
       setStage('room')
     })().catch((caught: unknown) => {
       if (cancelled) return
-      if (runtimeRef.current) stopRuntime(false)
+      if (runtimeRef.current) stopRuntime(true)
       else {
-        signal?.close()
+        if (resumed) signal?.leave()
+        else signal?.close()
         if (identity) destroyIdentity(identity)
         if (keys) wipeKeys(keys)
       }
@@ -1021,7 +1073,7 @@ export default function App() {
     if (preferences.rememberNickname) setPreferences({ ...preferences, nickname })
   }
 
-  const createRoom = async (rawNickname: string): Promise<void> => {
+  const createRoom = async (rawNickname: string, creationPassword?: string): Promise<void> => {
     const entryIdentity = takeEntryIdentity()
     if (!entryIdentity) {
       setError('随机头像仍在生成，请稍候重试。')
@@ -1032,20 +1084,25 @@ export default function App() {
     let keys: DerivedKeys | undefined
     let identity: SessionIdentity | undefined = entryIdentity
     let signal: SignalClient | undefined
+    let created = false
     try {
       const nickname = NicknameSchema.parse(rawNickname)
       const roomId = generateRoomId()
       const secret = generateLinkSecret()
       const pin = generatePin()
       const publicConfig = await loadPublicConfig()
+      setRoomCreationPasswordRequired(publicConfig.roomCreationPasswordRequired)
+      if (publicConfig.roomCreationPasswordRequired && !creationPassword) throw new Error('请输入会话创建密码')
       keys = await deriveRoomKeys(pin, roomId, secret)
       signal = new SignalClient(roomId, publicConfig.disconnectGraceMs)
       const confirmation = await signal.createRoom({
         nickname,
         admissionKey: keys.admissionKey,
         identityPublicKey: IdentityPublicKeySchema.parse(bytesToBase64Url(identity.publicKey)),
+        ...(creationPassword !== undefined ? { creationPassword } : {}),
       })
-      await setupRuntime(confirmation, signal, identity, keys, secret, pin, publicConfig.iceServers)
+      created = true
+      await setupRuntime(confirmation, signal, identity, keys, secret, pin)
       keys = undefined
       identity = undefined
       signal = undefined
@@ -1059,6 +1116,7 @@ export default function App() {
       setStage('created')
       void persistCurrentRecovery()
     } catch (caught) {
+      if (created) signal?.destroyRoom()
       stopRuntime(false)
       signal?.close()
       if (identity) destroyIdentity(identity)
@@ -1074,6 +1132,7 @@ export default function App() {
     if (!pending) return
     setBusy(true)
     setError(undefined)
+    let joined = false
     try {
       const confirmation = await pending.signal.finishJoin({
         nickname: pending.nickname,
@@ -1082,7 +1141,8 @@ export default function App() {
         challengeId: pending.challenge.challengeId,
         challenge: pending.challenge.challenge,
       })
-      await setupRuntime(confirmation, pending.signal, pending.identity, pending.keys, linkSecret!, pending.pin, pending.iceServers)
+      joined = true
+      await setupRuntime(confirmation, pending.signal, pending.identity, pending.keys, linkSecret!, pending.pin)
       rememberNickname(pending.nickname)
       pendingJoinRef.current = undefined
       setStage('room')
@@ -1090,8 +1150,9 @@ export default function App() {
     } catch (caught) {
       if (runtimeRef.current?.identity === pending.identity) {
         pendingJoinRef.current = undefined
-        stopRuntime(false)
+        stopRuntime(true)
       } else {
+        if (joined) pending.signal.leave()
         disposePendingJoin(pending)
         pendingJoinRef.current = undefined
       }
@@ -1120,7 +1181,7 @@ export default function App() {
       keys = await deriveRoomKeys(pin, initialRoomId.current, linkSecret)
       signal = new SignalClient(initialRoomId.current, publicConfig.disconnectGraceMs)
       const challenge = await signal.beginJoin(nickname, IdentityPublicKeySchema.parse(bytesToBase64Url(identity.publicKey)))
-      pendingJoinRef.current = { nickname, pin, identity, signal, keys, challenge, iceServers: publicConfig.iceServers }
+      pendingJoinRef.current = { nickname, pin, identity, signal, keys, challenge }
       keys = undefined
       identity = undefined
       signal = undefined
@@ -1299,7 +1360,7 @@ export default function App() {
           <span className="recovery-symbol"><SpinnerGap /></span>
           <span className="entry-eyebrow"><ShieldCheck weight="fill" />{preferences.locale === 'zh-CN' ? '标签页级安全恢复' : 'Tab-scoped secure recovery'}</span>
           <h1>{preferences.locale === 'zh-CN' ? '正在回到对话' : 'Returning to your conversation'}</h1>
-          <p>{preferences.locale === 'zh-CN' ? '正在恢复加密身份并重新建立成员间的 P2P 直连。' : 'Restoring your encrypted identity and re-establishing direct P2P paths.'}</p>
+          <p>{preferences.locale === 'zh-CN' ? '正在恢复加密身份并重新建立 Cloudflare TURN 中继。' : 'Restoring your encrypted identity and re-establishing Cloudflare TURN relays.'}</p>
         </div>
       </EntryShell>
     )
@@ -1323,7 +1384,7 @@ export default function App() {
 
   return (
     <EntryShell preferences={preferences} onPreferences={setPreferences}>
-      {stage === 'create' ? <CreateRoomView preferences={preferences} busy={busy} avatarSeed={entryIdentityPublicKey} avatarBusy={entryIdentityBusy} error={error} onRegenerateAvatar={regenerateEntryIdentity} onCreate={createRoom} /> : null}
+      {stage === 'create' ? <CreateRoomView preferences={preferences} busy={busy} avatarSeed={entryIdentityPublicKey} avatarBusy={entryIdentityBusy} creationPasswordRequired={roomCreationPasswordRequired} error={error} onRegenerateAvatar={regenerateEntryIdentity} onCreate={createRoom} /> : null}
       {stage === 'join' ? <JoinRoomView preferences={preferences} hasLinkSecret={Boolean(linkSecret)} busy={busy} avatarSeed={entryIdentityPublicKey} avatarBusy={entryIdentityBusy} error={error} onRegenerateAvatar={regenerateEntryIdentity} onJoin={joinRoom} /> : null}
       {stage === 'created' && createdDetails ? <RoomCreatedView pin={createdDetails.pin} invitation={createdDetails.invitation} preferences={preferences} onContinue={() => { setCreatedDetails(undefined); setStage('room') }} /> : null}
     </EntryShell>

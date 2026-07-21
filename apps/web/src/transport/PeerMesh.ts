@@ -9,8 +9,7 @@ interface PeerRecord {
   connection: RTCPeerConnection
   channel?: RTCDataChannel
   pendingCandidates: RTCIceCandidateInit[]
-  directVerified: boolean
-  verification?: Promise<void>
+  ready: boolean
 }
 
 export interface PeerMeshOptions {
@@ -22,21 +21,21 @@ export interface PeerMeshOptions {
   onChannelChange?: (memberId: string, state: RTCDataChannelState) => void
 }
 
-const DIRECT_CANDIDATE_TYPES = new Set(['host', 'srflx', 'prflx'])
 const MAX_PENDING_CANDIDATES = 64
 
-function stunOnlyServers(servers: RTCIceServer[]): RTCIceServer[] {
+function turnOnlyServers(servers: RTCIceServer[]): RTCIceServer[] {
   return servers.flatMap((server) => {
     const urls = (Array.isArray(server.urls) ? server.urls : [server.urls])
-      .filter((url): url is string => typeof url === 'string' && url.startsWith('stun:') && !/\s/u.test(url))
-    return urls.length === 0 ? [] : [{ urls }]
+      .filter((url): url is string => typeof url === 'string' && (url.startsWith('turn:') || url.startsWith('turns:')) && !/\s/u.test(url))
+    if (urls.length === 0 || typeof server.username !== 'string' || typeof server.credential !== 'string') return []
+    return [{ urls, username: server.username, credential: server.credential, credentialType: 'password' as const }]
   })
 }
 
-function rtcConfiguration(options: PeerMeshOptions): RTCConfiguration {
+function rtcConfiguration(iceServers: RTCIceServer[]): RTCConfiguration {
   return {
-    iceServers: stunOnlyServers(options.iceServers),
-    iceTransportPolicy: 'all',
+    iceServers: turnOnlyServers(iceServers),
+    iceTransportPolicy: 'relay',
     bundlePolicy: 'max-bundle',
   }
 }
@@ -47,72 +46,58 @@ function candidateType(candidate: string): string | undefined {
   return matches.length === 1 ? matches[0]?.[1]?.toLowerCase() : undefined
 }
 
-function directCandidate(candidate: RTCIceCandidateInit): boolean {
+function relayCandidate(candidate: RTCIceCandidateInit): boolean {
   if (!candidate.candidate) return true
-  const type = candidateType(candidate.candidate)
-  return type !== undefined && DIRECT_CANDIDATE_TYPES.has(type)
+  return candidateType(candidate.candidate) === 'relay'
 }
 
-function directDescription(description: RTCSessionDescriptionInit): boolean {
+function relayDescription(description: RTCSessionDescriptionInit): boolean {
   if (!description.sdp) return description.type === 'rollback'
-  const candidateLines = description.sdp
+  return description.sdp
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .filter((line) => line.startsWith('a=candidate:'))
-  return candidateLines.every((line) => {
-    const type = candidateType(line)
-    return type !== undefined && DIRECT_CANDIDATE_TYPES.has(type)
-  })
-}
-
-function sleep(delay: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, delay))
+    .every((line) => candidateType(line) === 'relay')
 }
 
 function statString(record: Record<string, unknown>, key: string): string | undefined {
   return typeof record[key] === 'string' ? record[key] : undefined
 }
 
-async function verifySelectedDirectPair(connection: RTCPeerConnection): Promise<boolean> {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    if (connection.connectionState === 'failed' || connection.connectionState === 'closed') return false
+async function selectedPairIsExplicitlyNonRelay(connection: RTCPeerConnection): Promise<boolean> {
+  try {
     const records = new Map<string, Record<string, unknown>>()
     const report = await connection.getStats()
     report.forEach((entry) => records.set(entry.id, entry as unknown as Record<string, unknown>))
-
     let selectedPair: Record<string, unknown> | undefined
     for (const record of records.values()) {
-      if (record.type === 'transport') {
-        const pairId = statString(record, 'selectedCandidatePairId')
-        if (pairId) selectedPair = records.get(pairId)
-      }
+      if (record.type !== 'transport') continue
+      const pairId = statString(record, 'selectedCandidatePairId')
+      if (pairId) selectedPair = records.get(pairId)
     }
-    if (!selectedPair) {
-      selectedPair = [...records.values()].find((record) =>
-        record.type === 'candidate-pair' &&
-        record.state === 'succeeded' &&
-        (record.nominated === true || record.selected === true),
-      )
-    }
-    if (selectedPair) {
-      const local = records.get(statString(selectedPair, 'localCandidateId') ?? '')
-      const remote = records.get(statString(selectedPair, 'remoteCandidateId') ?? '')
-      const localType = local ? statString(local, 'candidateType') : undefined
-      const remoteType = remote ? statString(remote, 'candidateType') : undefined
-      if (localType && remoteType) {
-        return DIRECT_CANDIDATE_TYPES.has(localType) && DIRECT_CANDIDATE_TYPES.has(remoteType)
-      }
-    }
-    await sleep(250)
+    selectedPair ??= [...records.values()].find((record) =>
+      record.type === 'candidate-pair' && record.state === 'succeeded' && (record.nominated === true || record.selected === true),
+    )
+    if (!selectedPair) return false
+    const local = records.get(statString(selectedPair, 'localCandidateId') ?? '')
+    const remote = records.get(statString(selectedPair, 'remoteCandidateId') ?? '')
+    const localType = local ? statString(local, 'candidateType') : undefined
+    const remoteType = remote ? statString(remote, 'candidateType') : undefined
+    return (localType !== undefined && localType !== 'relay') || (remoteType !== undefined && remoteType !== 'relay')
+  } catch {
+    return false
   }
-  return false
 }
 
 export class PeerMesh {
   private readonly peers = new Map<string, PeerRecord>()
   private knownMembers: Member[] = []
+  private iceServers: RTCIceServer[]
 
-  constructor(private readonly options: PeerMeshOptions) {}
+  constructor(private readonly options: PeerMeshOptions) {
+    this.iceServers = turnOnlyServers(options.iceServers)
+    if (this.iceServers.length === 0) throw new Error('Cloudflare TURN credentials are required')
+  }
 
   syncMembers(members: Member[]): void {
     this.knownMembers = [...members]
@@ -125,14 +110,14 @@ export class PeerMesh {
         const peer = this.createPeer(memberId)
         const channel = peer.connection.createDataChannel('veilink', { ordered: true })
         this.attachChannel(memberId, peer, channel)
-        void this.createOffer(memberId, peer)
+        void this.createOffer(memberId, peer).catch(() => this.failPeer(memberId, peer))
       }
     }
   }
 
   async handleSignal(sourceMemberId: string, payload: PeerSignalPayload): Promise<void> {
-    if (payload.description && !directDescription(payload.description)) throw new Error('Relayed or malformed ICE description rejected')
-    if (payload.candidate && !directCandidate(payload.candidate)) throw new Error('Relayed or malformed ICE candidate rejected')
+    if (payload.description && !relayDescription(payload.description)) throw new Error('Non-relay or malformed ICE description rejected')
+    if (payload.candidate && !relayCandidate(payload.candidate)) throw new Error('Non-relay or malformed ICE candidate rejected')
     const peer = this.peers.get(sourceMemberId) ?? this.createPeer(sourceMemberId)
     if (payload.description) {
       await peer.connection.setRemoteDescription(payload.description)
@@ -140,7 +125,7 @@ export class PeerMesh {
       if (payload.description.type === 'offer') {
         const answer = await peer.connection.createAnswer()
         await peer.connection.setLocalDescription(answer)
-        if (!directDescription(answer)) throw new Error('Browser produced a non-direct ICE answer')
+        if (!relayDescription(answer)) throw new Error('Browser produced a non-relay ICE answer')
         this.options.sendSignal(sourceMemberId, { description: answer })
       }
     }
@@ -158,13 +143,13 @@ export class PeerMesh {
 
   connectedMemberIds(): string[] {
     return [...this.peers.entries()]
-      .filter(([, peer]) => peer.directVerified && peer.channel?.readyState === 'open')
+      .filter(([, peer]) => peer.ready && peer.channel?.readyState === 'open')
       .map(([memberId]) => memberId)
   }
 
   async broadcast(data: string | ArrayBuffer): Promise<number> {
     const channels = [...this.peers.values()]
-      .filter((peer) => peer.directVerified)
+      .filter((peer) => peer.ready)
       .map((peer) => peer.channel)
       .filter((channel): channel is RTCDataChannel => channel?.readyState === 'open')
     await Promise.all(channels.map(async (channel) => {
@@ -178,11 +163,21 @@ export class PeerMesh {
     return channels.length
   }
 
+  async refreshIceServers(iceServers: RTCIceServer[]): Promise<void> {
+    const next = turnOnlyServers(iceServers)
+    if (next.length === 0) throw new Error('Cloudflare TURN credentials are required')
+    this.iceServers = next
+    for (const peer of this.peers.values()) peer.connection.setConfiguration(rtcConfiguration(this.iceServers))
+    await Promise.all([...this.peers.entries()]
+      .filter(([memberId]) => this.options.localMemberId.localeCompare(memberId) < 0)
+      .map(async ([memberId, peer]) => this.createOffer(memberId, peer, true)))
+  }
+
   removePeer(memberId: string): void {
     const peer = this.peers.get(memberId)
+    this.peers.delete(memberId)
     peer?.channel?.close()
     peer?.connection.close()
-    this.peers.delete(memberId)
   }
 
   destroy(): void {
@@ -190,22 +185,19 @@ export class PeerMesh {
   }
 
   private createPeer(memberId: string): PeerRecord {
-    const connection = new RTCPeerConnection(rtcConfiguration(this.options))
-    const peer: PeerRecord = { connection, pendingCandidates: [], directVerified: false }
+    const connection = new RTCPeerConnection(rtcConfiguration(this.iceServers))
+    const peer: PeerRecord = { connection, pendingCandidates: [], ready: false }
     this.peers.set(memberId, peer)
     connection.addEventListener('icecandidate', (event) => {
       if (!event.candidate) return
       const candidate = event.candidate.toJSON()
-      if (directCandidate(candidate)) this.options.sendSignal(memberId, { candidate })
+      if (relayCandidate(candidate)) this.options.sendSignal(memberId, { candidate })
     })
     connection.addEventListener('datachannel', (event) => this.attachChannel(memberId, peer, event.channel))
     connection.addEventListener('connectionstatechange', () => {
       this.options.onConnectionChange?.(memberId, connection.connectionState)
-      if (connection.connectionState === 'failed') {
-        this.removePeer(memberId)
-        window.setTimeout(() => this.syncMembers(this.knownMembers), 1_500)
-      }
-      if (connection.connectionState === 'closed') this.removePeer(memberId)
+      if (connection.connectionState === 'failed') this.failPeer(memberId, peer)
+      if (connection.connectionState === 'closed' && this.peers.get(memberId) === peer) this.removePeer(memberId)
     })
     return peer
   }
@@ -213,34 +205,35 @@ export class PeerMesh {
   private attachChannel(memberId: string, peer: PeerRecord, channel: RTCDataChannel): void {
     peer.channel?.close()
     peer.channel = channel
-    peer.directVerified = false
+    peer.ready = false
     channel.binaryType = 'arraybuffer'
     channel.addEventListener('open', () => {
-      peer.verification ??= this.verifyChannel(memberId, peer)
+      peer.ready = true
+      this.options.onChannelChange?.(memberId, 'open')
+      void selectedPairIsExplicitlyNonRelay(peer.connection).then((invalid) => {
+        if (invalid && this.peers.get(memberId) === peer) this.failPeer(memberId, peer)
+      })
     })
-    channel.addEventListener('close', () => this.options.onChannelChange?.(memberId, channel.readyState))
+    channel.addEventListener('close', () => {
+      peer.ready = false
+      this.options.onChannelChange?.(memberId, channel.readyState)
+    })
     channel.addEventListener('message', (event: MessageEvent<string | ArrayBuffer>) => {
-      if (peer.directVerified) this.options.onData(memberId, event.data)
+      if (peer.ready) this.options.onData(memberId, event.data)
     })
   }
 
-  private async verifyChannel(memberId: string, peer: PeerRecord): Promise<void> {
-    const direct = await verifySelectedDirectPair(peer.connection)
+  private failPeer(memberId: string, peer: PeerRecord): void {
     if (this.peers.get(memberId) !== peer) return
-    peer.verification = undefined
-    if (!direct || peer.channel?.readyState !== 'open') {
-      this.options.onConnectionChange?.(memberId, 'failed')
-      this.removePeer(memberId)
-      return
-    }
-    peer.directVerified = true
-    this.options.onChannelChange?.(memberId, 'open')
+    this.options.onConnectionChange?.(memberId, 'failed')
+    this.removePeer(memberId)
+    window.setTimeout(() => this.syncMembers(this.knownMembers), 1_500)
   }
 
   private async createOffer(memberId: string, peer: PeerRecord, iceRestart = false): Promise<void> {
     const offer = await peer.connection.createOffer({ iceRestart })
     await peer.connection.setLocalDescription(offer)
-    if (!directDescription(offer)) throw new Error('Browser produced a non-direct ICE offer')
+    if (!relayDescription(offer)) throw new Error('Browser produced a non-relay ICE offer')
     this.options.sendSignal(memberId, { description: offer })
   }
 }

@@ -22,6 +22,7 @@ import {
 } from "./primitives.js";
 
 const SnapshotVersionSchema = z.number().int().nonnegative().safe();
+const signalEncoder = new TextEncoder();
 
 export const PublicMemberSchema = z
   .object({
@@ -75,6 +76,9 @@ export const RoomSnapshotSchema = z
 export type RoomSnapshot = z.infer<typeof RoomSnapshotSchema>;
 
 const EmptyPayloadSchema = z.object({}).strict();
+const RoomCreationPasswordSchema = z.string().refine((value) => signalEncoder.encode(value).byteLength <= 256, {
+  message: "Room creation password must not exceed 256 UTF-8 bytes",
+});
 const RTCDescriptionSchema = z
   .object({
     type: z.enum(["offer", "answer", "pranswer", "rollback"]),
@@ -116,6 +120,7 @@ const ClientRoomCreateSchema = z
         nickname: NicknameSchema,
         admissionVerifier: AdmissionVerifierSchema,
         identityPublicKey: IdentityPublicKeySchema,
+        creationPassword: RoomCreationPasswordSchema.optional(),
       })
       .strict(),
   })
@@ -188,6 +193,13 @@ const ClientRtcCandidateSchema = z
       .strict(),
   })
   .strict();
+const ClientTurnCredentialsRefreshSchema = z
+  .object({
+    ...ClientEnvelopeBase,
+    type: z.literal("turn.credentials.refresh"),
+    payload: EmptyPayloadSchema,
+  })
+  .strict();
 const ClientHeartbeatSchema = z
   .object({
     ...ClientEnvelopeBase,
@@ -205,6 +217,7 @@ export const ClientSignalEnvelopeSchema = z.discriminatedUnion("type", [
   ClientRoomDestroySchema,
   ClientRtcDescriptionSchema,
   ClientRtcCandidateSchema,
+  ClientTurnCredentialsRefreshSchema,
   ClientHeartbeatSchema,
 ]);
 export type ClientSignalEnvelope = z.infer<typeof ClientSignalEnvelopeSchema>;
@@ -311,6 +324,30 @@ const ServerRtcCandidateSchema = z
   })
   .strict();
 
+const TurnIceServerSchema = z
+  .object({
+    urls: z.array(z.string().max(2_048).refine((value) => value.startsWith("turn:") || value.startsWith("turns:"), "Invalid TURN URL")).min(1).max(8),
+    username: z.string().min(1).max(256),
+    credential: z.string().min(1).max(512),
+    credentialType: z.literal("password"),
+  })
+  .strict();
+export const TurnCredentialsSchema = z
+  .object({
+    iceServers: z.array(TurnIceServerSchema).min(1).max(4),
+    expiresAt: EpochMillisecondsSchema,
+  })
+  .strict();
+export type TurnCredentials = z.infer<typeof TurnCredentialsSchema>;
+
+const ServerTurnCredentialsSchema = z
+  .object({
+    ...ServerRoomEnvelopeBase,
+    type: z.literal("turn.credentials"),
+    payload: TurnCredentialsSchema,
+  })
+  .strict();
+
 const ServerHeartbeatAckSchema = z
   .object({
     ...ServerRoomEnvelopeBase,
@@ -340,6 +377,9 @@ export const SignalErrorCodeSchema = z.enum([
   "forbidden",
   "member_not_found",
   "invalid_signal",
+  "invalid_creation_password",
+  "turn_unavailable",
+  "turn_credentials_expired",
   "internal_error",
 ]);
 export type SignalErrorCode = z.infer<typeof SignalErrorCodeSchema>;
@@ -371,6 +411,7 @@ export const ServerSignalEnvelopeSchema = z.discriminatedUnion("type", [
   ServerOwnerChangedSchema,
   ServerRtcDescriptionSchema,
   ServerRtcCandidateSchema,
+  ServerTurnCredentialsSchema,
   ServerHeartbeatAckSchema,
   ServerRoomEndedSchema,
   ServerErrorSchema,

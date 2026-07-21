@@ -74,6 +74,7 @@ describe("versioned signaling envelopes", () => {
         nickname: "  Owner  ",
         admissionVerifier,
         identityPublicKey: publicKey,
+        creationPassword: "shared deployment secret",
       },
     };
 
@@ -81,7 +82,48 @@ describe("versioned signaling envelopes", () => {
     expect(parsed.type).toBe("room.create");
     if (parsed.type === "room.create") {
       expect(parsed.payload.nickname).toBe("Owner");
+      expect(parsed.payload.creationPassword).toBe("shared deployment secret");
     }
+  });
+
+  it("accepts an omitted creation password and rejects an oversized one", () => {
+    const base = {
+      v: PROTOCOL_VERSION,
+      type: "room.create",
+      requestId,
+      roomId,
+      payload: { nickname: "Owner", admissionVerifier, identityPublicKey: publicKey },
+    };
+    expect(ClientSignalEnvelopeSchema.safeParse(base).success).toBe(true);
+    expect(ClientSignalEnvelopeSchema.safeParse({
+      ...base,
+      payload: { ...base.payload, creationPassword: "x".repeat(257) },
+    }).success).toBe(false);
+  });
+
+  it("parses relay credential requests and responses", () => {
+    expect(ClientSignalEnvelopeSchema.safeParse({
+      v: PROTOCOL_VERSION,
+      type: "turn.credentials.refresh",
+      requestId,
+      roomId,
+      payload: {},
+    }).success).toBe(true);
+    expect(ServerSignalEnvelopeSchema.safeParse({
+      v: PROTOCOL_VERSION,
+      type: "turn.credentials",
+      requestId,
+      roomId,
+      payload: {
+        iceServers: [{
+          urls: ["turns:turn.cloudflare.com:443?transport=tcp"],
+          username: "temporary-user",
+          credential: "temporary-credential",
+          credentialType: "password",
+        }],
+        expiresAt: 90_000_000,
+      },
+    }).success).toBe(true);
   });
 
   it("rejects legacy P2P creation and mode-switch requests", () => {

@@ -9,16 +9,20 @@ interface CreateRoomViewProps {
   busy: boolean
   avatarSeed?: string
   avatarBusy: boolean
+  creationPasswordRequired: boolean
   error?: string
   onRegenerateAvatar: () => Promise<void> | void
-  onCreate: (nickname: string) => Promise<void> | void
+  onCreate: (nickname: string, creationPassword?: string) => Promise<void> | void
 }
 
-export function CreateRoomView({ preferences, busy, avatarSeed, avatarBusy, error, onRegenerateAvatar, onCreate }: CreateRoomViewProps) {
+export function CreateRoomView({ preferences, busy, avatarSeed, avatarBusy, creationPasswordRequired, error, onRegenerateAvatar, onCreate }: CreateRoomViewProps) {
   const [nickname, setNickname] = useState(preferences.rememberNickname ? preferences.nickname ?? '' : '')
+  const [creationPassword, setCreationPassword] = useState('')
   const submit = (event: FormEvent): void => {
     event.preventDefault()
-    if (nickname.trim()) void onCreate(nickname)
+    if (nickname.trim() && (!creationPasswordRequired || creationPassword)) {
+      void onCreate(nickname, creationPasswordRequired ? creationPassword : undefined)
+    }
   }
 
   return (
@@ -29,8 +33,9 @@ export function CreateRoomView({ preferences, busy, avatarSeed, avatarBusy, erro
         <button type="button" className="avatar-refresh" disabled={busy || avatarBusy} onClick={() => void onRegenerateAvatar()}><ArrowsClockwise />{avatarBusy ? t(preferences.locale, 'avatarGenerating') : t(preferences.locale, 'changeAvatar')}</button>
       </div>
       <label>{t(preferences.locale, 'nickname')}<input autoFocus autoComplete="off" autoCapitalize="words" spellCheck="false" maxLength={64} name="nickname" type="text" value={nickname} placeholder={t(preferences.locale, 'nicknamePlaceholder')} onChange={(event) => setNickname(event.target.value)} required /></label>
+      {creationPasswordRequired ? <label>{t(preferences.locale, 'creationPassword')}<input autoComplete="off" maxLength={256} name="creationPassword" type="password" value={creationPassword} placeholder={t(preferences.locale, 'creationPasswordPlaceholder')} onChange={(event) => setCreationPassword(event.target.value)} required /></label> : null}
       {error ? <div className="form-error" role="alert">{error}</div> : null}
-      <button aria-busy={busy} className="primary-button" type="submit" disabled={busy || avatarBusy || !avatarSeed || !nickname.trim()}><LockKey weight="fill" />{t(preferences.locale, 'create')}</button>
+      <button aria-busy={busy} className="primary-button" type="submit" disabled={busy || avatarBusy || !avatarSeed || !nickname.trim() || (creationPasswordRequired && !creationPassword)}><LockKey weight="fill" />{t(preferences.locale, 'create')}</button>
     </form>
   )
 }

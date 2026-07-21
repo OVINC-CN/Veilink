@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	Version           = 5
+	Version           = 6
 	MaxSignalBytes    = 128 * 1024
 	MaxSDPBytes       = 128 * 1024
 	MaxCandidateBytes = 4096
@@ -65,6 +65,7 @@ type RoomCreatePayload struct {
 	Nickname          string `json:"nickname"`
 	AdmissionVerifier string `json:"admissionVerifier"`
 	IdentityPublicKey string `json:"identityPublicKey"`
+	CreationPassword  string `json:"creationPassword,omitempty"`
 }
 
 type RoomChallengePayload struct {
@@ -112,6 +113,18 @@ type HeartbeatPayload struct {
 }
 
 type EmptyPayload struct{}
+
+type TURNICEServer struct {
+	URLs           []string `json:"urls"`
+	Username       string   `json:"username"`
+	Credential     string   `json:"credential"`
+	CredentialType string   `json:"credentialType"`
+}
+
+type TURNCredentialsPayload struct {
+	ICEServers []TURNICEServer `json:"iceServers"`
+	ExpiresAt  int64           `json:"expiresAt"`
+}
 
 type ErrorPayload struct {
 	Code         string `json:"code"`
@@ -200,7 +213,7 @@ func NormalizeNickname(value string) (string, error) {
 
 func ValidateCreate(payload RoomCreatePayload) (RoomCreatePayload, error) {
 	nickname, err := NormalizeNickname(payload.Nickname)
-	if err != nil || !ValidToken(payload.AdmissionVerifier, 32) || !ValidToken(payload.IdentityPublicKey, 32) {
+	if err != nil || !ValidToken(payload.AdmissionVerifier, 32) || !ValidToken(payload.IdentityPublicKey, 32) || !utf8.ValidString(payload.CreationPassword) || len(payload.CreationPassword) > 256 {
 		return payload, errors.New("invalid create payload")
 	}
 	payload.Nickname = nickname
@@ -244,16 +257,16 @@ func ValidateDescription(payload TargetDescriptionPayload) error {
 	}
 	for _, line := range strings.Split(payload.Description.SDP, "\n") {
 		candidate := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
-		if strings.HasPrefix(candidate, "a=candidate:") && !DirectCandidate(strings.TrimPrefix(candidate, "a=")) {
-			return errors.New("non-direct ICE candidate")
+		if strings.HasPrefix(candidate, "a=candidate:") && !RelayCandidate(strings.TrimPrefix(candidate, "a=")) {
+			return errors.New("non-relay ICE candidate")
 		}
 	}
 	return nil
 }
 
 func ValidateCandidate(payload TargetCandidatePayload) error {
-	if !ValidToken(payload.TargetMemberID, 16) || len(payload.Candidate.Candidate) > MaxCandidateBytes || !DirectCandidate(payload.Candidate.Candidate) {
-		return errors.New("invalid or relayed ICE candidate")
+	if !ValidToken(payload.TargetMemberID, 16) || len(payload.Candidate.Candidate) > MaxCandidateBytes || !RelayCandidate(payload.Candidate.Candidate) {
+		return errors.New("invalid or non-relay ICE candidate")
 	}
 	if payload.Candidate.SDPMid != nil && len(*payload.Candidate.SDPMid) > 256 {
 		return errors.New("invalid SDP mid")
@@ -267,7 +280,7 @@ func ValidateCandidate(payload TargetCandidatePayload) error {
 	return nil
 }
 
-func DirectCandidate(candidate string) bool {
+func RelayCandidate(candidate string) bool {
 	if candidate == "" {
 		return true
 	}
@@ -275,7 +288,7 @@ func DirectCandidate(candidate string) bool {
 		return false
 	}
 	matches := candidateTypePattern.FindAllStringSubmatch(candidate, -1)
-	return len(matches) == 1 && len(matches[0]) == 2 && (strings.EqualFold(matches[0][1], "host") || strings.EqualFold(matches[0][1], "srflx") || strings.EqualFold(matches[0][1], "prflx"))
+	return len(matches) == 1 && len(matches[0]) == 2 && strings.EqualFold(matches[0][1], "relay")
 }
 
 func Snapshot(roomID string, version int64, ownerID string, members []PublicMember, createdAt, expiresAt, now int64) RoomSnapshot {

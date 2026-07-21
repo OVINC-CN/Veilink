@@ -14,6 +14,7 @@ import {
   type RoomId,
   type ServerSignalEnvelope,
   type ServerSignalType,
+  type TurnCredentials,
 } from '@veilink/protocol'
 
 interface PendingRequest {
@@ -131,7 +132,11 @@ export class SignalClient {
     nickname: Nickname
     admissionKey: Uint8Array
     identityPublicKey: IdentityPublicKey
+    creationPassword?: string
   }): Promise<SessionConfirmation> {
+    if (input.creationPassword !== undefined && window.location.protocol !== 'https:') {
+      throw new Error('Room creation passwords require HTTPS/WSS')
+    }
     await this.connect()
     const response = await this.request({
       v: PROTOCOL_VERSION,
@@ -142,6 +147,7 @@ export class SignalClient {
         nickname: input.nickname,
         admissionVerifier: base64UrlEncode(input.admissionKey) as never,
         identityPublicKey: input.identityPublicKey,
+        ...(input.creationPassword !== undefined ? { creationPassword: input.creationPassword } : {}),
       },
     }, ['room.created'])
     if (response.type !== 'room.created') throw new Error('Unexpected create response')
@@ -151,6 +157,18 @@ export class SignalClient {
       identityPublicKey: input.identityPublicKey,
     }
     this.startHeartbeat()
+    return response.payload
+  }
+
+  async requestTurnCredentials(): Promise<TurnCredentials> {
+    const response = await this.request({
+      v: PROTOCOL_VERSION,
+      type: 'turn.credentials.refresh',
+      requestId: generateRequestId(),
+      roomId: this.roomId,
+      payload: {},
+    }, ['turn.credentials'])
+    if (response.type !== 'turn.credentials') throw new Error('Unexpected TURN credential response')
     return response.payload
   }
 

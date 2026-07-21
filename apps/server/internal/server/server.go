@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -22,6 +24,7 @@ import (
 	"github.com/OVINC-CN/Veilink/apps/server/internal/config"
 	"github.com/OVINC-CN/Veilink/apps/server/internal/protocol"
 	"github.com/OVINC-CN/Veilink/apps/server/internal/store"
+	"github.com/OVINC-CN/Veilink/apps/server/internal/turn"
 	"github.com/coder/websocket"
 )
 
@@ -40,6 +43,8 @@ type connection struct {
 	writeMu              sync.Mutex
 	stateMu              sync.RWMutex
 	binding              *binding
+	turnMu               sync.Mutex
+	turnCredentials      *protocol.TURNCredentialsPayload
 	malformed            int
 	messageWindowStarted time.Time
 	messageCount         int
@@ -53,6 +58,7 @@ type connection struct {
 type Server struct {
 	cfg           config.Config
 	store         *store.Store
+	turnClient    *turn.Client
 	mux           *http.ServeMux
 	connections   map[string]*connection
 	connectionsMu sync.RWMutex
@@ -64,11 +70,11 @@ type Server struct {
 }
 
 type publicConfig struct {
-	ProtocolVersion     int               `json:"protocolVersion"`
-	Limits              publicLimits      `json:"limits"`
-	HeartbeatIntervalMS int64             `json:"heartbeatIntervalMs"`
-	DisconnectGraceMS   int64             `json:"disconnectGraceMs"`
-	ICEServers          []publicICEServer `json:"iceServers"`
+	ProtocolVersion              int          `json:"protocolVersion"`
+	Limits                       publicLimits `json:"limits"`
+	HeartbeatIntervalMS          int64        `json:"heartbeatIntervalMs"`
+	DisconnectGraceMS            int64        `json:"disconnectGraceMs"`
+	RoomCreationPasswordRequired bool         `json:"roomCreationPasswordRequired"`
 }
 
 type publicLimits struct {
@@ -78,14 +84,11 @@ type publicLimits struct {
 	MaxFileSizeMB int   `json:"maxFileSizeMb"`
 }
 
-type publicICEServer struct {
-	URLs []string `json:"urls"`
-}
-
 func New(cfg config.Config, state *store.Store) *Server {
 	server := &Server{
 		cfg:         cfg,
 		store:       state,
+		turnClient:  turn.New(cfg.CloudflareTURNKeyID, cfg.CloudflareTURNAPIToken, cfg.TURNCredentialTTL),
 		mux:         http.NewServeMux(),
 		connections: make(map[string]*connection),
 		staticIndex: filepath.Join(cfg.StaticRoot, "index.html"),
@@ -175,11 +178,11 @@ func (s *Server) apiConfig(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 	writeJSON(response, http.StatusOK, publicConfig{
-		ProtocolVersion:     protocol.Version,
-		Limits:              publicLimits{MaxMembers: s.cfg.MaxMembers, MaxRoomTTLMS: config.MaxRoomTTL.Milliseconds(), RoomTTLMS: s.cfg.RoomTTL.Milliseconds(), MaxFileSizeMB: 256},
-		HeartbeatIntervalMS: s.cfg.HeartbeatInterval.Milliseconds(),
-		DisconnectGraceMS:   s.cfg.DisconnectGrace.Milliseconds(),
-		ICEServers:          []publicICEServer{{URLs: append([]string(nil), s.cfg.STUNURLs...)}},
+		ProtocolVersion:              protocol.Version,
+		Limits:                       publicLimits{MaxMembers: s.cfg.MaxMembers, MaxRoomTTLMS: config.MaxRoomTTL.Milliseconds(), RoomTTLMS: s.cfg.RoomTTL.Milliseconds(), MaxFileSizeMB: 256},
+		HeartbeatIntervalMS:          s.cfg.HeartbeatInterval.Milliseconds(),
+		DisconnectGraceMS:            s.cfg.DisconnectGrace.Milliseconds(),
+		RoomCreationPasswordRequired: s.cfg.RoomCreationPasswordRequired,
 	})
 }
 
@@ -343,6 +346,9 @@ func (c *connection) handle(parent context.Context, envelope protocol.ClientEnve
 		if !allowed {
 			return &store.StoreError{Code: store.ErrRateLimited}
 		}
+		if !c.server.validRoomCreationPassword(payload.CreationPassword) {
+			return actionError("invalid_creation_password")
+		}
 		key, err := base64.RawURLEncoding.DecodeString(payload.AdmissionVerifier)
 		if err != nil || len(key) != 32 {
 			return actionError("invalid_request")
@@ -448,6 +454,18 @@ func (c *connection) handle(parent context.Context, envelope protocol.ClientEnve
 			return actionError("invalid_signal")
 		}
 		return c.server.store.ForwardRTC(ctx, current.RoomID, current.MemberID, current.SessionID, payload.TargetMemberID, envelope.Type, payload.Candidate)
+	case "turn.credentials.refresh":
+		if envelope.RequestID == "" {
+			return actionError("invalid_request")
+		}
+		if _, err := protocol.DecodePayload[protocol.EmptyPayload](envelope.Payload); err != nil {
+			return actionError("invalid_request")
+		}
+		current := c.requireBinding(envelope.RoomID)
+		if current == nil {
+			return actionError("not_in_room")
+		}
+		return c.sendTurnCredentials(ctx, envelope.RequestID, current.RoomID)
 	case "heartbeat":
 		current := c.requireBinding(envelope.RoomID)
 		if current == nil {
@@ -536,6 +554,20 @@ func (c *connection) sendError(code, requestID, roomID string) {
 	_ = c.send(protocol.Frame("error", roomID, requestID, payload))
 }
 
+func (c *connection) sendTurnCredentials(ctx context.Context, requestID, roomID string) error {
+	c.turnMu.Lock()
+	defer c.turnMu.Unlock()
+	if cached := c.turnCredentials; cached != nil && cached.ExpiresAt > time.Now().Add(15*time.Minute).UnixMilli() {
+		return c.send(protocol.Frame("turn.credentials", roomID, requestID, *cached))
+	}
+	credentials, err := c.server.turnClient.Generate(ctx)
+	if err != nil {
+		return actionError("turn_unavailable")
+	}
+	c.turnCredentials = &credentials
+	return c.send(protocol.Frame("turn.credentials", roomID, requestID, credentials))
+}
+
 func (c *connection) close(code websocket.StatusCode, reason string) {
 	c.closeOnce.Do(func() {
 		c.closed.Store(true)
@@ -545,6 +577,9 @@ func (c *connection) close(code websocket.StatusCode, reason string) {
 }
 
 func (c *connection) cleanup() {
+	c.turnMu.Lock()
+	c.turnCredentials = nil
+	c.turnMu.Unlock()
 	c.close(websocket.StatusNormalClosure, "connection closed")
 	c.server.connectionsMu.Lock()
 	delete(c.server.connections, c.id)
@@ -709,6 +744,14 @@ func (s *Server) trustedIP(ip net.IP) bool {
 	return false
 }
 
+func (s *Server) validRoomCreationPassword(value string) bool {
+	if !s.cfg.RoomCreationPasswordRequired {
+		return true
+	}
+	digest := sha256.Sum256([]byte(value))
+	return subtle.ConstantTimeCompare(digest[:], s.cfg.RoomCreationPasswordHash[:]) == 1
+}
+
 func (s *Server) static(response http.ResponseWriter, request *http.Request) {
 	if strings.HasPrefix(request.URL.Path, "/api/") || request.URL.Path == "/signal" {
 		writeJSON(response, http.StatusNotFound, map[string]string{"error": "not_found"})
@@ -790,6 +833,10 @@ func mapError(err error) (string, bool) {
 			return "member_not_found", false
 		case "invalid_signal":
 			return "invalid_signal", false
+		case "invalid_creation_password":
+			return "invalid_creation_password", false
+		case "turn_unavailable":
+			return "turn_unavailable", false
 		default:
 			return "invalid_request", false
 		}
@@ -808,7 +855,7 @@ func mapError(err error) (string, bool) {
 
 func errorMessage(code string) string {
 	messages := map[string]string{
-		"invalid_request": "The request is invalid.", "unsupported_version": "The protocol version is unsupported.", "room_not_found": "The invitation is unavailable.", "room_exists": "Creation could not be completed. Please retry.", "room_full": "The participant limit has been reached.", "room_expired": "The invitation has expired.", "challenge_expired": "The admission challenge is invalid or expired.", "bad_proof": "Admission verification failed.", "rate_limited": "Too many admission attempts.", "resume_rejected": "The secure connection cannot be restored.", "forbidden": "This action is not permitted.", "member_not_found": "The participant is unavailable.", "invalid_signal": "The WebRTC signal violates the direct transport policy.", "internal_error": "The server could not process the request.",
+		"invalid_request": "The request is invalid.", "unsupported_version": "The protocol version is unsupported.", "room_not_found": "The invitation is unavailable.", "room_exists": "Creation could not be completed. Please retry.", "room_full": "The participant limit has been reached.", "room_expired": "The invitation has expired.", "challenge_expired": "The admission challenge is invalid or expired.", "bad_proof": "Admission verification failed.", "rate_limited": "Too many admission attempts.", "resume_rejected": "The secure connection could not be restored.", "forbidden": "This action is not permitted.", "member_not_found": "The participant is unavailable.", "invalid_signal": "The WebRTC signal violates the relay-only transport policy.", "invalid_creation_password": "The room creation password is incorrect.", "turn_unavailable": "Cloudflare TURN is temporarily unavailable.", "turn_credentials_expired": "The Cloudflare TURN credentials expired.", "internal_error": "The server could not process the request.",
 	}
 	if message, ok := messages[code]; ok {
 		return message

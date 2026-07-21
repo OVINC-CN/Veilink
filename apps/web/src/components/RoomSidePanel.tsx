@@ -69,11 +69,11 @@ export function RoomConnectionDetails({
           <PlugsConnected />
         </div>
         <ul className="connection-facts">
-          <li><CheckCircle weight="fill" /><span><strong>{zh ? 'P2P 直连' : 'P2P direct'}</strong><small>{connectionState === 'ready' ? (zh ? '已连接' : 'Connected') : (zh ? '建立中' : 'Connecting')}</small></span></li>
+          <li><CheckCircle weight="fill" /><span><strong>{zh ? 'Cloudflare TURN 中继' : 'Cloudflare TURN relay'}</strong><small>{connectionState === 'ready' ? (zh ? '已连接' : 'Connected') : (zh ? '建立中' : 'Connecting')}</small></span></li>
           <li><ShieldCheck weight="fill" /><span><strong>{zh ? '端到端加密' : 'End-to-end encrypted'}</strong><small>{zh ? '已启用' : 'Enabled'}</small></span></li>
-          <li><LockKey weight="fill" /><span><strong>{zh ? '无中继' : 'No relay'}</strong><small>{zh ? '已强制' : 'Enforced'}</small></span></li>
+          <li><LockKey weight="fill" /><span><strong>{zh ? '仅允许中继' : 'Relay only'}</strong><small>{zh ? '已强制' : 'Enforced'}</small></span></li>
         </ul>
-        <p className="connection-explainer">{zh ? '聊天和文件只在成员设备之间直接传输；无法直连时会安全失败。' : 'Chats and files travel directly between member devices; the connection fails closed when a direct path is unavailable.'}</p>
+        <p className="connection-explainer">{zh ? '聊天和文件经 Cloudflare TURN 中继传输；应用层内容保持端到端加密，不会降级为直连。' : 'Chats and files use Cloudflare TURN relays; application content remains end-to-end encrypted and never falls back to a direct path.'}</p>
       </section>
 
       <section className="room-details-section room-information" aria-labelledby="room-information-heading">

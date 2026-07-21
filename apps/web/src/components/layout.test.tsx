@@ -21,7 +21,7 @@ describe('minimal entry experience', () => {
     const onCreate = vi.fn()
     const { container } = render(
       <EntryShell preferences={preferences} onPreferences={vi.fn()}>
-        <CreateRoomView preferences={preferences} busy={false} avatarSeed="avatar-seed" avatarBusy={false} onRegenerateAvatar={vi.fn()} onCreate={onCreate} />
+        <CreateRoomView preferences={preferences} busy={false} avatarSeed="avatar-seed" avatarBusy={false} creationPasswordRequired={false} onRegenerateAvatar={vi.fn()} onCreate={onCreate} />
       </EntryShell>,
     )
 
@@ -36,13 +36,28 @@ describe('minimal entry experience', () => {
 
     fireEvent.change(screen.getByRole('textbox', { name: '昵称' }), { target: { value: 'Mira' } })
     fireEvent.click(screen.getByRole('button', { name: '创建' }))
-    expect(onCreate).toHaveBeenCalledWith('Mira')
+    expect(onCreate).toHaveBeenCalledWith('Mira', undefined)
     expect(screen.queryByText('P2P 直连')).not.toBeInTheDocument()
+  })
+
+  it('requires and submits the deployment creation password when configured', () => {
+    const preferences = { ...defaultPreferences(), locale: 'zh-CN' as const }
+    const onCreate = vi.fn()
+    render(
+      <CreateRoomView preferences={preferences} busy={false} avatarSeed="avatar-seed" avatarBusy={false} creationPasswordRequired onRegenerateAvatar={vi.fn()} onCreate={onCreate} />,
+    )
+    fireEvent.change(screen.getByRole('textbox', { name: '昵称' }), { target: { value: 'Mira' } })
+    const password = screen.getByLabelText('会话创建密码')
+    expect(password).toBeRequired()
+    expect(screen.getByRole('button', { name: '创建' })).toBeDisabled()
+    fireEvent.change(password, { target: { value: 'deployment-secret' } })
+    fireEvent.click(screen.getByRole('button', { name: '创建' }))
+    expect(onCreate).toHaveBeenCalledWith('Mira', 'deployment-secret')
   })
 })
 
 describe('room workspace layout', () => {
-  it('exposes direct-connection details without TURN metadata', () => {
+  it('exposes relay-only connection details without participant IP metadata', () => {
     const preferences = { ...defaultPreferences(), locale: 'zh-CN' as const }
     const room: ActiveRoom = {
       roomId: 'room-id',
@@ -93,7 +108,7 @@ describe('room workspace layout', () => {
     expect(screen.getByRole('navigation', { name: '房间操作' })).toBeInTheDocument()
     expect(screen.queryByRole('navigation', { name: '房间视图' })).not.toBeInTheDocument()
     expect(screen.queryByRole('complementary', { name: 'Veilink 导航' })).not.toBeInTheDocument()
-    expect(screen.queryByText('TURN 中继')).not.toBeInTheDocument()
+    expect(screen.queryByText('Cloudflare TURN 中继')).not.toBeInTheDocument()
 
     const membersButton = screen.getByRole('button', { name: /成员与连接，2 人在线/u })
     expect(membersButton).toHaveAttribute('aria-expanded', 'false')
@@ -101,8 +116,8 @@ describe('room workspace layout', () => {
     expect(membersButton).toHaveAttribute('aria-expanded', 'true')
 
     const detailsPanel = screen.getByRole('region', { name: '连接详情' })
-    expect(within(detailsPanel).getByText('P2P 直连')).toBeInTheDocument()
-    expect(within(detailsPanel).getByText('无中继')).toBeInTheDocument()
+    expect(within(detailsPanel).getByText('Cloudflare TURN 中继')).toBeInTheDocument()
+    expect(within(detailsPanel).getByText('仅允许中继')).toBeInTheDocument()
     expect(within(detailsPanel).getByText('Mira（你）')).toBeInTheDocument()
     expect(within(detailsPanel).getByText('River')).toBeInTheDocument()
     expect(within(detailsPanel).queryByText(/公网 IP/u)).not.toBeInTheDocument()

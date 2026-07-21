@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -10,32 +11,37 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const MaxRoomTTL = 24 * time.Hour
 
 type Config struct {
-	Host                        string
-	Port                        int
-	AppOrigin                   string
-	TLSCertFile                 string
-	TLSKeyFile                  string
-	RedisURL                    string
-	RedisKeyPrefix              string
-	StateHMACSecret             string
-	STUNURLs                    []string
-	RoomTTL                     time.Duration
-	MaxRooms                    int
-	MaxConnections              int
-	MaxConnectionsPerIP         int
-	MaxRoomsPerIP               int
-	RoomCreateAttemptsPerMinute int
-	MaxMembers                  int
-	HeartbeatInterval           time.Duration
-	DisconnectGrace             time.Duration
-	ChallengeTTL                time.Duration
-	TrustedProxyNets            []*net.IPNet
-	StaticRoot                  string
+	Host                         string
+	Port                         int
+	AppOrigin                    string
+	TLSCertFile                  string
+	TLSKeyFile                   string
+	RedisURL                     string
+	RedisKeyPrefix               string
+	StateHMACSecret              string
+	CloudflareTURNKeyID          string
+	CloudflareTURNAPIToken       string
+	TURNCredentialTTL            time.Duration
+	RoomCreationPasswordHash     [sha256.Size]byte
+	RoomCreationPasswordRequired bool
+	RoomTTL                      time.Duration
+	MaxRooms                     int
+	MaxConnections               int
+	MaxConnectionsPerIP          int
+	MaxRoomsPerIP                int
+	RoomCreateAttemptsPerMinute  int
+	MaxMembers                   int
+	HeartbeatInterval            time.Duration
+	DisconnectGrace              time.Duration
+	ChallengeTTL                 time.Duration
+	TrustedProxyNets             []*net.IPNet
+	StaticRoot                   string
 }
 
 func Load() (Config, error) {
@@ -80,16 +86,16 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	turnCredentialTTLSeconds, err := integer("TURN_CREDENTIAL_TTL_SECONDS", 25*60*60, 300, 48*60*60)
+	if err != nil {
+		return Config{}, err
+	}
 
 	appOrigin, err := origin(strings.TrimSpace(os.Getenv("APP_ORIGIN")))
 	if err != nil {
 		return Config{}, err
 	}
 	redisURL, err := redisURL(strings.TrimSpace(os.Getenv("REDIS_URL")))
-	if err != nil {
-		return Config{}, err
-	}
-	stunURLs, err := stunURLs(strings.TrimSpace(os.Getenv("STUN_URLS")))
 	if err != nil {
 		return Config{}, err
 	}
@@ -105,6 +111,22 @@ func Load() (Config, error) {
 	if secret == "replace-with-64-random-hex-characters-before-deploying" {
 		return Config{}, errors.New("STATE_HMAC_SECRET must be replaced before deployment")
 	}
+	turnKeyID := strings.TrimSpace(os.Getenv("CLOUDFLARE_TURN_KEY_ID"))
+	if len(turnKeyID) != 32 || strings.ContainsAny(turnKeyID, " \t\r\n") {
+		return Config{}, errors.New("CLOUDFLARE_TURN_KEY_ID must contain exactly 32 non-whitespace characters")
+	}
+	turnAPIToken := strings.TrimSpace(os.Getenv("CLOUDFLARE_TURN_API_TOKEN"))
+	if len(turnAPIToken) < 32 || len(turnAPIToken) > 512 || strings.ContainsAny(turnAPIToken, " \t\r\n") {
+		return Config{}, errors.New("CLOUDFLARE_TURN_API_TOKEN must contain 32 to 512 non-whitespace characters")
+	}
+	creationPassword := os.Getenv("ROOM_CREATION_PASSWORD")
+	if !utf8.ValidString(creationPassword) || len(creationPassword) > 256 {
+		return Config{}, errors.New("ROOM_CREATION_PASSWORD must be valid UTF-8 and at most 256 bytes")
+	}
+	creationPasswordRequired := creationPassword != ""
+	creationPasswordHash := sha256.Sum256([]byte(creationPassword))
+	creationPassword = ""
+	_ = os.Unsetenv("ROOM_CREATION_PASSWORD")
 	tlsCert := strings.TrimSpace(os.Getenv("TLS_CERT_FILE"))
 	tlsKey := strings.TrimSpace(os.Getenv("TLS_KEY_FILE"))
 	if (tlsCert == "") != (tlsKey == "") {
@@ -121,27 +143,31 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Host:                        envOr("HOST", "0.0.0.0"),
-		Port:                        port,
-		AppOrigin:                   appOrigin,
-		TLSCertFile:                 tlsCert,
-		TLSKeyFile:                  tlsKey,
-		RedisURL:                    redisURL,
-		RedisKeyPrefix:              prefix,
-		StateHMACSecret:             secret,
-		STUNURLs:                    stunURLs,
-		RoomTTL:                     time.Duration(roomTTLSeconds) * time.Second,
-		MaxRooms:                    maxRooms,
-		MaxConnections:              maxConnections,
-		MaxConnectionsPerIP:         maxConnectionsPerIP,
-		MaxRoomsPerIP:               maxRoomsPerIP,
-		RoomCreateAttemptsPerMinute: createAttempts,
-		MaxMembers:                  8,
-		HeartbeatInterval:           15 * time.Second,
-		DisconnectGrace:             time.Duration(reconnectSeconds) * time.Second,
-		ChallengeTTL:                30 * time.Second,
-		TrustedProxyNets:            trusted,
-		StaticRoot:                  staticRoot,
+		Host:                         envOr("HOST", "0.0.0.0"),
+		Port:                         port,
+		AppOrigin:                    appOrigin,
+		TLSCertFile:                  tlsCert,
+		TLSKeyFile:                   tlsKey,
+		RedisURL:                     redisURL,
+		RedisKeyPrefix:               prefix,
+		StateHMACSecret:              secret,
+		CloudflareTURNKeyID:          turnKeyID,
+		CloudflareTURNAPIToken:       turnAPIToken,
+		TURNCredentialTTL:            time.Duration(turnCredentialTTLSeconds) * time.Second,
+		RoomCreationPasswordHash:     creationPasswordHash,
+		RoomCreationPasswordRequired: creationPasswordRequired,
+		RoomTTL:                      time.Duration(roomTTLSeconds) * time.Second,
+		MaxRooms:                     maxRooms,
+		MaxConnections:               maxConnections,
+		MaxConnectionsPerIP:          maxConnectionsPerIP,
+		MaxRoomsPerIP:                maxRoomsPerIP,
+		RoomCreateAttemptsPerMinute:  createAttempts,
+		MaxMembers:                   8,
+		HeartbeatInterval:            15 * time.Second,
+		DisconnectGrace:              time.Duration(reconnectSeconds) * time.Second,
+		ChallengeTTL:                 30 * time.Second,
+		TrustedProxyNets:             trusted,
+		StaticRoot:                   staticRoot,
 	}, nil
 }
 
@@ -198,25 +224,6 @@ func redisURL(value string) (string, error) {
 		return "", errors.New("REDIS_URL must include authentication outside local development")
 	}
 	return value, nil
-}
-
-func stunURLs(value string) ([]string, error) {
-	if value == "" {
-		return nil, errors.New("STUN_URLS is required; configure STUN only, never TURN")
-	}
-	parts := strings.Split(value, ",")
-	urls := make([]string, 0, len(parts))
-	for _, part := range parts {
-		candidate := strings.TrimSpace(part)
-		if candidate == "" || !strings.HasPrefix(candidate, "stun:") || strings.ContainsAny(candidate, " \t\r\n") || len(candidate) > 2048 {
-			return nil, fmt.Errorf("invalid STUN URL: %q", candidate)
-		}
-		urls = append(urls, candidate)
-	}
-	if len(urls) > 8 {
-		return nil, errors.New("STUN_URLS must contain at most 8 entries")
-	}
-	return urls, nil
 }
 
 func trustedProxyNets(value string) ([]*net.IPNet, error) {
