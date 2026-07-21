@@ -40,6 +40,7 @@ export interface JoinPeerDiagnostic {
   iceConnectionState: RTCIceConnectionState
   iceGatheringState: RTCIceGatheringState
   dataChannelState: RTCDataChannelState | 'pending'
+  retryCount?: number
   lastOperation?: string
   lastError?: string
 }

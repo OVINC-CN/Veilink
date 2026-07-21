@@ -8,7 +8,7 @@ import {
   IdentityPublicKeySchema,
   MemberIdSchema,
   NicknameSchema,
-  PEER_CONNECTION_TIMEOUT_MS,
+  PEER_CONNECTION_WARNING_MS,
   PROTOCOL_VERSION,
   RoomIdSchema,
   buildInvitePath,
@@ -82,6 +82,7 @@ interface PublicConfig {
   limits: { maxMembers: number; maxRoomTtlMs: number; roomTtlMs: number; maxFileSizeMb: number }
   heartbeatIntervalMs: number
   disconnectGraceMs: number
+  peerConnectionTimeoutMs: number
   roomCreationPasswordRequired: boolean
 }
 
@@ -121,7 +122,8 @@ interface SessionRuntime {
   peerRateWindows: Map<string, PeerRateWindow>
   peerViolationWindows: Map<string, PeerViolationWindow>
   peerDataQueues: Map<string, Promise<void>>
-  peerConnectionTimers: Map<string, number>
+  peerConnectionTimers: Map<string, { warning?: number; timeout: number }>
+  peerConnectionTimeoutMs: number
   initialPeerIds: Set<string>
   initialConnectionComplete: boolean
   initialConnectionGate?: InitialConnectionGate
@@ -269,6 +271,9 @@ async function loadPublicConfig(): Promise<PublicConfig> {
     throw new Error('服务器协议版本不受支持')
   }
   if (typeof value.roomCreationPasswordRequired !== 'boolean') throw new Error('服务器返回了无效的创建权限配置')
+  if (!Number.isSafeInteger(value.peerConnectionTimeoutMs) || value.peerConnectionTimeoutMs < 30_000 || value.peerConnectionTimeoutMs > 300_000) {
+    throw new Error('服务器返回了无效的成员连接超时配置')
+  }
   return value
 }
 
@@ -498,10 +503,10 @@ export default function App() {
             }
           }
           if (event.type === 'connection') {
-            return { ...peer, connectionState: event.state, status: event.state === 'failed' ? 'failed' : peer.status }
+            return { ...peer, connectionState: event.state, status: event.state === 'failed' ? 'connecting' : peer.status }
           }
           if (event.type === 'ice-connection') {
-            return { ...peer, iceConnectionState: event.state, status: event.state === 'failed' ? 'failed' : peer.status }
+            return { ...peer, iceConnectionState: event.state, status: event.state === 'failed' ? 'connecting' : peer.status }
           }
           if (event.type === 'ice-gathering') return { ...peer, iceGatheringState: event.state }
           if (event.type === 'channel') {
@@ -513,15 +518,26 @@ export default function App() {
               ...(ready ? { finishedAt: now } : {}),
             }
           }
+          const terminal = event.operation === 'relay-policy-check' || event.operation === 'initial-peer-timeout'
           return {
             ...peer,
-            status: 'failed',
+            status: terminal ? 'failed' : 'connecting',
             lastOperation: event.operation,
             lastError: sanitizeDiagnosticText(event.error),
           }
         }),
       }
     })
+  }
+
+  const markJoinPeerSlow = (memberId: string): void => {
+    const hint = memberIdHint(memberId)
+    setJoinAttempt((current) => current ? {
+      ...current,
+      peers: current.peers.map((peer) => peer.memberIdHint === hint && peer.status !== 'ready' && peer.status !== 'left'
+        ? { ...peer, retryCount: (peer.retryCount ?? 0) + 1, lastOperation: 'ice-restart', lastError: undefined }
+        : peer),
+    } : current)
   }
 
   const markJoinPeerLeft = (memberId: string): void => {
@@ -696,16 +712,27 @@ export default function App() {
   }
 
   const clearPeerConnectionTimer = (runtime: SessionRuntime, memberId: string): void => {
-    const timer = runtime.peerConnectionTimers.get(memberId)
-    if (timer !== undefined) window.clearTimeout(timer)
+    const timers = runtime.peerConnectionTimers.get(memberId)
+    if (timers?.warning !== undefined) window.clearTimeout(timers.warning)
+    if (timers !== undefined) window.clearTimeout(timers.timeout)
     runtime.peerConnectionTimers.delete(memberId)
     completeInitialConnectionIfReady(runtime)
   }
 
   const clearPeerConnectionTimers = (runtime: SessionRuntime): void => {
-    for (const timer of runtime.peerConnectionTimers.values()) window.clearTimeout(timer)
+    for (const timers of runtime.peerConnectionTimers.values()) {
+      if (timers.warning !== undefined) window.clearTimeout(timers.warning)
+      window.clearTimeout(timers.timeout)
+    }
     runtime.peerConnectionTimers.clear()
   }
+
+  const initialPeerStillPending = (runtime: SessionRuntime, memberId: string): boolean =>
+    runtimeRef.current === runtime &&
+    !runtime.initialConnectionComplete &&
+    runtime.initialPeerIds.has(memberId) &&
+    roomRef.current?.members.some((member) => member.id === memberId) === true &&
+    !runtime.mesh.connectedMemberIds().includes(memberId)
 
   const armPeerConnectionTimer = (runtime: SessionRuntime, memberId: string): void => {
     if (
@@ -718,36 +745,44 @@ export default function App() {
       runtime.peerConnectionTimers.has(memberId)
     ) return
     setTransportReady(false)
-    const timer = window.setTimeout(() => {
+    const warning = runtime.peerConnectionTimeoutMs > PEER_CONNECTION_WARNING_MS
+      ? window.setTimeout(() => {
+          const timers = runtime.peerConnectionTimers.get(memberId)
+          if (timers) timers.warning = undefined
+          if (initialPeerStillPending(runtime, memberId)) markJoinPeerSlow(memberId)
+        }, PEER_CONNECTION_WARNING_MS)
+      : undefined
+    const timeout = window.setTimeout(() => {
       runtime.peerConnectionTimers.delete(memberId)
-      if (
-        runtimeRef.current !== runtime ||
-        runtime.initialConnectionComplete ||
-        !runtime.initialPeerIds.has(memberId) ||
-        !roomRef.current?.members.some((member) => member.id === memberId) ||
-        runtime.mesh.connectedMemberIds().includes(memberId)
-      ) {
+      if (!initialPeerStillPending(runtime, memberId)) {
         completeInitialConnectionIfReady(runtime)
         return
       }
       const member = roomRef.current?.members.find((item) => item.id === memberId)
       const timeoutError = new JoinProcessError(
         'client.peer_timeout',
-        `Timed out after ${PEER_CONNECTION_TIMEOUT_MS} ms waiting for the TURN data channel${member ? ` to ${member.nickname}` : ''}`,
+        `Timed out after ${runtime.peerConnectionTimeoutMs} ms waiting for the TURN data channel${member ? ` to ${member.nickname}` : ''}`,
       )
       updateJoinPeer(memberId, { type: 'error', operation: 'initial-peer-timeout', error: timeoutError })
       if (runtime.initialConnectionGate && !runtime.initialConnectionGate.settled) {
         runtime.initialConnectionGate.reject(timeoutError)
         return
       }
-      setError('连接超时，已自动退出，请重试。')
-      stopRuntime(true)
+      setError('连接超时，已停止本轮连接，请重试。')
+      const roomId = roomRef.current?.roomId
+      stopRuntime(true, { preserveInvitation: true })
       clearRecovery()
-      window.history.replaceState(window.history.state, '', '/')
-      initialRoomId.current = undefined
-      setStage('create')
-    }, PEER_CONNECTION_TIMEOUT_MS)
-    runtime.peerConnectionTimers.set(memberId, timer)
+      if (roomId && linkSecret) {
+        window.history.replaceState(window.history.state, '', `/room/${roomId}`)
+        initialRoomId.current = roomId
+        setStage('join')
+      } else {
+        window.history.replaceState(window.history.state, '', '/')
+        initialRoomId.current = undefined
+        setStage('create')
+      }
+    }, runtime.peerConnectionTimeoutMs)
+    runtime.peerConnectionTimers.set(memberId, { ...(warning !== undefined ? { warning } : {}), timeout })
   }
 
   const armRoomConnectionTimers = (runtime: SessionRuntime, members: Member[]): void => {
@@ -1097,6 +1132,7 @@ export default function App() {
     keys: DerivedKeys,
     secret: string,
     pin: string | undefined,
+    peerConnectionTimeoutMs: number,
     initialReplayCounters: ReadonlyMap<string, number> = new Map(),
     trackJoin = false,
   ): Promise<ActiveRoom> => {
@@ -1134,12 +1170,9 @@ export default function App() {
       onDiagnostic: (memberId, event) => {
         if (trackJoin) updateJoinPeer(memberId, event)
         if (event.type !== 'error' || !runtime.initialConnectionGate || runtime.initialConnectionGate.settled) return
-        const code = event.operation === 'relay-policy-check'
-          ? 'client.relay_policy_rejected'
-          : event.operation === 'handle-signal'
-            ? 'client.webrtc_signal_failed'
-            : 'client.webrtc_operation_failed'
-        runtime.initialConnectionGate.reject(new JoinProcessError(code, sanitizeDiagnosticText(event.error)))
+        if (event.operation === 'relay-policy-check') {
+          runtime.initialConnectionGate.reject(new JoinProcessError('client.relay_policy_rejected', sanitizeDiagnosticText(event.error)))
+        }
       },
     })
     const mesh = trackJoin
@@ -1169,6 +1202,7 @@ export default function App() {
       peerViolationWindows: new Map(),
       peerDataQueues: new Map(),
       peerConnectionTimers: new Map(),
+      peerConnectionTimeoutMs,
       initialPeerIds: new Set(initialRoom.members
         .map((member) => member.id)
         .filter((memberId) => memberId !== initialRoom.memberId)),
@@ -1231,12 +1265,16 @@ export default function App() {
     let identity: SessionIdentity | undefined
     let keys: DerivedKeys | undefined
     let resumed = false
+    let recoveryRoomId: string | undefined
+    let recoveryLinkSecret: string | undefined
 
     void (async () => {
       const roomId = initialRoomId.current
       if (!roomId) throw new Error('恢复路径无效')
+      recoveryRoomId = roomId
       const bundle = await loadRecovery(roomId)
       if (!bundle) throw new Error('恢复信息已失效')
+      recoveryLinkSecret = bundle.linkSecret
       const publicConfig = await runJoinStep('config', loadPublicConfig)
       await runJoinStep('keys', () => {
         identity = restoreIdentity(bundle)
@@ -1254,7 +1292,7 @@ export default function App() {
       resumed = true
       if (cancelled) throw new Error('恢复已取消')
       setLinkSecret(bundle.linkSecret)
-      await setupRuntime(confirmation, signal, identity!, keys!, bundle.linkSecret, bundle.pin, restoreReplayCounters(bundle), true)
+      await setupRuntime(confirmation, signal, identity!, keys!, bundle.linkSecret, bundle.pin, publicConfig.peerConnectionTimeoutMs, restoreReplayCounters(bundle), true)
       signal = undefined
       identity = undefined
       keys = undefined
@@ -1267,7 +1305,8 @@ export default function App() {
       setStage('join')
     })().catch((caught: unknown) => {
       if (cancelled) return
-      if (runtimeRef.current) stopRuntime(true)
+      const retryablePeerTimeout = caught instanceof JoinProcessError && caught.code === 'client.peer_timeout' && recoveryRoomId !== undefined && recoveryLinkSecret !== undefined
+      if (runtimeRef.current) stopRuntime(true, { preserveInvitation: retryablePeerTimeout })
       else {
         if (resumed) signal?.leave()
         else signal?.close()
@@ -1275,10 +1314,17 @@ export default function App() {
         if (keys) wipeKeys(keys)
       }
       clearRecovery()
-      initialRoomId.current = undefined
-      window.history.replaceState(window.history.state, '', '/')
       setError(caught instanceof Error ? `无法恢复会话：${caught.message}` : '无法恢复会话')
-      setStage('create')
+      if (retryablePeerTimeout) {
+        initialRoomId.current = recoveryRoomId
+        setLinkSecret(recoveryLinkSecret)
+        window.history.replaceState(window.history.state, '', `/room/${recoveryRoomId}`)
+        setStage('join')
+      } else {
+        initialRoomId.current = undefined
+        window.history.replaceState(window.history.state, '', '/')
+        setStage('create')
+      }
     })
 
     return () => { cancelled = true }
@@ -1418,7 +1464,7 @@ export default function App() {
         ...(creationPassword !== undefined ? { creationPassword } : {}),
       })
       created = true
-      await setupRuntime(confirmation, signal, identity, keys, secret, pin)
+      await setupRuntime(confirmation, signal, identity, keys, secret, pin, publicConfig.peerConnectionTimeoutMs)
       keys = undefined
       identity = undefined
       signal = undefined
@@ -1483,7 +1529,7 @@ export default function App() {
         challenge: challenge.challenge,
       }))
       joined = true
-      await setupRuntime(confirmation, signal, identity, keys, secret, pin, new Map(), true)
+      await setupRuntime(confirmation, signal, identity, keys, secret, pin, publicConfig.peerConnectionTimeoutMs, new Map(), true)
       pendingJoinRef.current = undefined
       rememberNickname(nickname)
       identity = undefined

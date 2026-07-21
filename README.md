@@ -144,17 +144,23 @@ control and generate independent secrets for each deployment.
 | `TRUST_PROXY_CIDRS` | Proxy | CIDRs of the controlled direct reverse-proxy hop |
 | `ROOM_CREATION_PASSWORD` | No | Shared deployment password for creating rooms; empty allows public creation |
 | `REDIS_KEY_PREFIX` | No | Namespace for short-lived state; default `veilink` |
-| `TURN_CREDENTIAL_TTL_SECONDS` | No | TURN credential lifetime; default `90000` |
-| `RECONNECT_GRACE_SECONDS` | No | Refresh/reconnect lease; default `30` |
-| `ROOM_TTL_SECONDS` | No | Initial room lifetime and full lifetime restored by each host renewal; default and maximum `86400` |
-| `MAX_CONNECTIONS` | No | Global Redis-backed connection cap; default `2048` |
-| `MAX_CONNECTIONS_PER_IP` | No | Per-IP connection cap; default `64` |
-| `MAX_ROOMS_PER_IP` | No | Per-IP active room cap; default `32` |
-| `ROOM_CREATE_ATTEMPTS_PER_MINUTE` | No | Per-IP room creation rate; default `20` |
+| `TURN_CREDENTIAL_TTL_SECONDS` | No | TURN credential lifetime; default `90000`, range `300`–`172800` |
+| `RECONNECT_GRACE_SECONDS` | No | Refresh/reconnect lease; default `30`, range `5`–`900` |
+| `PEER_CONNECTION_TIMEOUT_SECONDS` | No | Hard timeout for initial TURN peer connections; default `90`, range `30`–`300`; a retry starts after `30` seconds |
+| `ROOM_TTL_SECONDS` | No | Initial room lifetime and full lifetime restored by each host renewal; default `86400`, range `60`–`86400` |
+| `MAX_ROOMS` | No | Global active room cap; default `1000`, range `1`–`100000` |
+| `MAX_CONNECTIONS` | No | Global Redis-backed connection cap; default `2048`, range `1`–`100000` |
+| `MAX_CONNECTIONS_PER_IP` | No | Per-IP connection cap; default `64`, range `1`–`10000` |
+| `MAX_ROOMS_PER_IP` | No | Per-IP active room cap; default `32`, range `1`–`10000` |
+| `ROOM_CREATE_ATTEMPTS_PER_MINUTE` | No | Per-IP room creation rate; default `20`, range `1`–`10000` |
 
 `APP_ORIGIN` must exactly match the browser's `Origin` header. Only trust proxy
 headers from a controlled direct hop. Disable or irreversibly anonymize reverse
 proxy access logs because room URLs and source IPs are sensitive metadata.
+
+Native TLS requires both `TLS_CERT_FILE` and `TLS_KEY_FILE`. When using Compose,
+mount the certificate and key read-only through an override and set these values
+to their paths inside the container.
 
 The optional room creation password controls who may create rooms on a
 deployment. It is separate from each room's invitation PIN and encryption

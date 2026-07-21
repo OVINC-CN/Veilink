@@ -129,6 +129,7 @@ function diagnosticSummary(attempt: JoinAttempt, locale: 'zh-CN' | 'en-US', now:
     for (const peer of attempt.peers) {
       lines.push(`- ${peer.nickname} [${peer.memberIdHint}] ${peer.role} / ${peerStatusLabels[locale][peer.status]}`)
       lines.push(`  PC=${peer.connectionState} ICE=${peer.iceConnectionState} Gathering=${peer.iceGatheringState} DC=${peer.dataChannelState}`)
+      if (peer.retryCount) lines.push(`  negotiation retries: ${peer.retryCount}`)
       if (peer.lastOperation) lines.push(`  operation: ${peer.lastOperation}`)
       if (peer.lastError) lines.push(`  error: ${peer.lastError}`)
     }
@@ -140,10 +141,14 @@ function diagnosticSummary(attempt: JoinAttempt, locale: 'zh-CN' | 'en-US', now:
 }
 
 function PeerDiagnosticRow({ peer, locale, now }: { peer: JoinPeerDiagnostic; locale: 'zh-CN' | 'en-US'; now: number }) {
+  const retrying = peer.status === 'connecting' && (peer.retryCount ?? 0) > 0
+  const status = retrying
+    ? (locale === 'zh-CN' ? '连接较慢，正在重试' : 'Slow connection; retrying')
+    : peerStatusLabels[locale][peer.status]
   return (
     <li className={`join-peer is-${peer.status}`}>
       <div><strong>{peer.nickname}</strong><code>{peer.memberIdHint}</code><span>{peer.role}</span></div>
-      <small>{peerStatusLabels[locale][peer.status]} · {elapsed(peer.startedAt, peer.finishedAt, now)}</small>
+      <small>{status} · {elapsed(peer.startedAt, peer.finishedAt, now)}</small>
       <dl>
         <div><dt>PC</dt><dd>{peer.connectionState}</dd></div>
         <div><dt>ICE</dt><dd>{peer.iceConnectionState}</dd></div>
@@ -186,6 +191,7 @@ function JoinProgress({ attempt, locale }: { attempt: JoinAttempt; locale: 'zh-C
     && !attempt.failure
     && attempt.steps.every((step) => step.status === 'success' || step.status === 'skipped')
   const failure = attempt.failure ? failureCopy(attempt.failure, locale) : undefined
+  const slowPeerCount = attempt.peers.filter((peer) => peer.status === 'connecting' && (peer.retryCount ?? 0) > 0).length
   const copy = async (): Promise<void> => {
     try {
       await navigator.clipboard.writeText(diagnosticSummary(attempt, locale, Date.now()))
@@ -217,6 +223,7 @@ function JoinProgress({ attempt, locale }: { attempt: JoinAttempt; locale: 'zh-C
       </div>
 
       {failure ? <div className="join-failure" role="alert"><strong>{failure.title}</strong><span>{failure.suggestion}</span><code>{attempt.failure?.code}</code></div> : null}
+      {!failure && slowPeerCount > 0 ? <div className="join-warning" role="status"><strong>{zh ? '网络连接较慢' : 'The connection is taking longer'}</strong><span>{zh ? `正在为 ${slowPeerCount} 位成员重新协商 TURN 中继，请继续等待。` : `Retrying TURN negotiation for ${slowPeerCount} member${slowPeerCount === 1 ? '' : 's'}. Please keep this page open.`}</span></div> : null}
 
       {expanded ? (
         <div className="join-progress-details">

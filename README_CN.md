@@ -134,17 +134,22 @@ GOTOOLCHAIN=local go -C apps/server build ./...
 | `TRUST_PROXY_CIDRS` | 使用代理时 | 受控的直接反向代理节点 CIDR |
 | `ROOM_CREATION_PASSWORD` | 否 | 创建房间所需的共享部署密码；留空时允许公开创建 |
 | `REDIS_KEY_PREFIX` | 否 | 短期状态命名空间；默认 `veilink` |
-| `TURN_CREDENTIAL_TTL_SECONDS` | 否 | TURN 凭证有效期；默认 `90000` |
-| `RECONNECT_GRACE_SECONDS` | 否 | 刷新/重连租约；默认 `30` |
-| `ROOM_TTL_SECONDS` | 否 | 房间初始有效期及房主每次续期后恢复的完整有效期；默认值及上限均为 `86400` |
-| `MAX_CONNECTIONS` | 否 | Redis 全局连接上限；默认 `2048` |
-| `MAX_CONNECTIONS_PER_IP` | 否 | 单 IP 连接上限；默认 `64` |
-| `MAX_ROOMS_PER_IP` | 否 | 单 IP 活动房间上限；默认 `32` |
-| `ROOM_CREATE_ATTEMPTS_PER_MINUTE` | 否 | 单 IP 每分钟创建次数；默认 `20` |
+| `TURN_CREDENTIAL_TTL_SECONDS` | 否 | TURN 凭证有效期；默认 `90000`，范围 `300`–`172800` |
+| `RECONNECT_GRACE_SECONDS` | 否 | 刷新/重连租约；默认 `30`，范围 `5`–`900` |
+| `PEER_CONNECTION_TIMEOUT_SECONDS` | 否 | 初始 TURN 成员连接硬超时；默认 `90`，范围 `30`–`300`；连接满 `30` 秒时自动重试 |
+| `ROOM_TTL_SECONDS` | 否 | 房间初始有效期及房主每次续期后恢复的完整有效期；默认 `86400`，范围 `60`–`86400` |
+| `MAX_ROOMS` | 否 | 全局活动房间上限；默认 `1000`，范围 `1`–`100000` |
+| `MAX_CONNECTIONS` | 否 | Redis 全局连接上限；默认 `2048`，范围 `1`–`100000` |
+| `MAX_CONNECTIONS_PER_IP` | 否 | 单 IP 连接上限；默认 `64`，范围 `1`–`10000` |
+| `MAX_ROOMS_PER_IP` | 否 | 单 IP 活动房间上限；默认 `32`，范围 `1`–`10000` |
+| `ROOM_CREATE_ATTEMPTS_PER_MINUTE` | 否 | 单 IP 每分钟创建次数；默认 `20`，范围 `1`–`10000` |
 
 `APP_ORIGIN` 必须与浏览器的 `Origin` 请求头完全一致。只应信任受控的直接代理
 节点。房间 URL 和源 IP 都属于敏感元数据，因此反向代理访问日志必须关闭或进行
 不可逆匿名化。
+
+原生 TLS 必须同时配置 `TLS_CERT_FILE` 和 `TLS_KEY_FILE`。使用 Compose 时，
+需要通过 override 将证书与私钥以只读方式挂载，并填写它们在容器内的路径。
 
 可选的房间创建密码用于控制谁能在当前部署创建房间。它与每个房间的邀请 PIN
 及加密密钥相互独立，不会存入 Redis，也不会影响已有房间。

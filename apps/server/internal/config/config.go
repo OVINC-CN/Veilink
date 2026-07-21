@@ -39,6 +39,7 @@ type Config struct {
 	MaxMembers                   int
 	HeartbeatInterval            time.Duration
 	DisconnectGrace              time.Duration
+	PeerConnectionTimeout        time.Duration
 	ChallengeTTL                 time.Duration
 	TrustedProxyNets             []*net.IPNet
 	StaticRoot                   string
@@ -83,6 +84,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	reconnectSeconds, err := integer("RECONNECT_GRACE_SECONDS", 30, 5, 900)
+	if err != nil {
+		return Config{}, err
+	}
+	peerConnectionTimeoutSeconds, err := integer("PEER_CONNECTION_TIMEOUT_SECONDS", 90, 30, 300)
 	if err != nil {
 		return Config{}, err
 	}
@@ -165,6 +170,7 @@ func Load() (Config, error) {
 		MaxMembers:                   8,
 		HeartbeatInterval:            15 * time.Second,
 		DisconnectGrace:              time.Duration(reconnectSeconds) * time.Second,
+		PeerConnectionTimeout:        time.Duration(peerConnectionTimeoutSeconds) * time.Second,
 		ChallengeTTL:                 30 * time.Second,
 		TrustedProxyNets:             trusted,
 		StaticRoot:                   staticRoot,

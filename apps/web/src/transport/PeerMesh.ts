@@ -1,4 +1,5 @@
 import type { Member } from '../models'
+import { PEER_CONNECTION_WARNING_MS } from '../protocol'
 
 export interface PeerSignalPayload {
   description?: RTCSessionDescriptionInit
@@ -24,6 +25,7 @@ interface PeerRecord {
   channel?: RTCDataChannel
   pendingCandidates: RTCIceCandidateInit[]
   ready: boolean
+  negotiationRetryTimer?: number
 }
 
 type PeerConnectionConstructor = typeof RTCPeerConnection
@@ -128,9 +130,11 @@ async function selectedPairIsExplicitlyNonRelay(connection: RTCPeerConnection): 
 
 export class PeerMesh {
   private readonly peers = new Map<string, PeerRecord>()
+  private readonly peerRebuildTimers = new Set<number>()
   private readonly peerConnectionConstructor: PeerConnectionConstructor
   private knownMembers: Member[] = []
   private iceServers: RTCIceServer[]
+  private destroyed = false
 
   constructor(private readonly options: PeerMeshOptions) {
     this.iceServers = turnOnlyServers(options.iceServers)
@@ -139,6 +143,7 @@ export class PeerMesh {
   }
 
   syncMembers(members: Member[]): void {
+    if (this.destroyed) return
     this.knownMembers = [...members]
     const remoteIds = new Set(members.map((member) => member.id).filter((id) => id !== this.options.localMemberId))
     for (const memberId of this.peers.keys()) {
@@ -149,6 +154,7 @@ export class PeerMesh {
         const peer = this.createPeer(memberId)
         const channel = peer.connection.createDataChannel('veilink', { ordered: true })
         this.attachChannel(memberId, peer, channel)
+        this.scheduleNegotiationRetry(memberId, peer)
         void this.createOffer(memberId, peer).catch((error: unknown) => {
           this.reportError(memberId, 'create-offer', error)
           this.failPeer(memberId, peer)
@@ -158,6 +164,7 @@ export class PeerMesh {
   }
 
   async handleSignal(sourceMemberId: string, payload: PeerSignalPayload): Promise<void> {
+    if (this.destroyed) return
     try {
       if (payload.description && !relayDescription(payload.description)) throw new Error('Non-relay or malformed ICE description rejected')
       if (payload.candidate && !relayCandidate(payload.candidate)) throw new Error('Non-relay or malformed ICE candidate rejected')
@@ -211,6 +218,7 @@ export class PeerMesh {
   }
 
   async refreshIceServers(iceServers: RTCIceServer[]): Promise<void> {
+    if (this.destroyed) return
     const next = turnOnlyServers(iceServers)
     if (next.length === 0) throw new Error('Cloudflare TURN credentials are required')
     this.iceServers = next
@@ -223,11 +231,15 @@ export class PeerMesh {
   removePeer(memberId: string): void {
     const peer = this.peers.get(memberId)
     this.peers.delete(memberId)
+    if (peer?.negotiationRetryTimer !== undefined) window.clearTimeout(peer.negotiationRetryTimer)
     peer?.channel?.close()
     peer?.connection.close()
   }
 
   destroy(): void {
+    this.destroyed = true
+    for (const timer of this.peerRebuildTimers) window.clearTimeout(timer)
+    this.peerRebuildTimers.clear()
     for (const memberId of [...this.peers.keys()]) this.removePeer(memberId)
   }
 
@@ -243,12 +255,16 @@ export class PeerMesh {
       iceGatheringState: connection.iceGatheringState,
     })
     connection.addEventListener('icecandidate', (event) => {
+      if (this.destroyed) return
       if (!event.candidate) return
       const candidate = event.candidate.toJSON()
       if (relayCandidate(candidate)) this.options.sendSignal(memberId, { candidate })
     })
-    connection.addEventListener('datachannel', (event) => this.attachChannel(memberId, peer, event.channel))
+    connection.addEventListener('datachannel', (event) => {
+      if (!this.destroyed) this.attachChannel(memberId, peer, event.channel)
+    })
     connection.addEventListener('connectionstatechange', () => {
+      if (this.destroyed) return
       this.options.onDiagnostic?.(memberId, { type: 'connection', state: connection.connectionState })
       this.options.onConnectionChange?.(memberId, connection.connectionState)
       if (connection.connectionState === 'failed') {
@@ -258,6 +274,7 @@ export class PeerMesh {
       if (connection.connectionState === 'closed' && this.peers.get(memberId) === peer) this.removePeer(memberId)
     })
     connection.addEventListener('iceconnectionstatechange', () => {
+      if (this.destroyed) return
       this.options.onDiagnostic?.(memberId, { type: 'ice-connection', state: connection.iceConnectionState })
       if (connection.iceConnectionState === 'failed') {
         this.reportError(memberId, 'ice-connection', new Error('ICE connection failed'))
@@ -265,6 +282,7 @@ export class PeerMesh {
       }
     })
     connection.addEventListener('icegatheringstatechange', () => {
+      if (this.destroyed) return
       this.options.onDiagnostic?.(memberId, { type: 'ice-gathering', state: connection.iceGatheringState })
     })
     return peer
@@ -277,7 +295,12 @@ export class PeerMesh {
     channel.binaryType = 'arraybuffer'
     this.options.onDiagnostic?.(memberId, { type: 'channel', state: channel.readyState })
     channel.addEventListener('open', () => {
+      if (this.destroyed) return
       peer.ready = true
+      if (peer.negotiationRetryTimer !== undefined) {
+        window.clearTimeout(peer.negotiationRetryTimer)
+        peer.negotiationRetryTimer = undefined
+      }
       this.options.onDiagnostic?.(memberId, { type: 'channel', state: 'open' })
       this.options.onChannelChange?.(memberId, 'open')
       void selectedPairIsExplicitlyNonRelay(peer.connection).then((invalid) => {
@@ -288,6 +311,7 @@ export class PeerMesh {
       })
     })
     channel.addEventListener('close', () => {
+      if (this.destroyed) return
       const closedBeforeReady = !peer.ready
       peer.ready = false
       this.options.onDiagnostic?.(memberId, { type: 'channel', state: channel.readyState })
@@ -297,10 +321,11 @@ export class PeerMesh {
       }
     })
     channel.addEventListener('error', () => {
+      if (this.destroyed) return
       this.reportError(memberId, 'data-channel', new Error('RTC data channel error'))
     })
     channel.addEventListener('message', (event: MessageEvent<string | ArrayBuffer>) => {
-      if (peer.ready) this.options.onData(memberId, event.data)
+      if (!this.destroyed && peer.ready) this.options.onData(memberId, event.data)
     })
   }
 
@@ -308,7 +333,24 @@ export class PeerMesh {
     if (this.peers.get(memberId) !== peer) return
     this.options.onConnectionChange?.(memberId, 'failed')
     this.removePeer(memberId)
-    window.setTimeout(() => this.syncMembers(this.knownMembers), 1_500)
+    if (this.destroyed) return
+    const timer = window.setTimeout(() => {
+      this.peerRebuildTimers.delete(timer)
+      if (!this.destroyed) this.syncMembers(this.knownMembers)
+    }, 1_500)
+    this.peerRebuildTimers.add(timer)
+  }
+
+  private scheduleNegotiationRetry(memberId: string, peer: PeerRecord): void {
+    if (!localMemberOffers(this.options.localMemberId, memberId)) return
+    peer.negotiationRetryTimer = window.setTimeout(() => {
+      peer.negotiationRetryTimer = undefined
+      if (this.peers.get(memberId) !== peer || peer.ready) return
+      void this.createOffer(memberId, peer, true).catch((error: unknown) => {
+        this.reportError(memberId, 'ice-restart', error)
+        this.failPeer(memberId, peer)
+      })
+    }, PEER_CONNECTION_WARNING_MS)
   }
 
   private async createOffer(memberId: string, peer: PeerRecord, iceRestart = false): Promise<void> {

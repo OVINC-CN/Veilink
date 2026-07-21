@@ -74,6 +74,7 @@ type publicConfig struct {
 	Limits                       publicLimits `json:"limits"`
 	HeartbeatIntervalMS          int64        `json:"heartbeatIntervalMs"`
 	DisconnectGraceMS            int64        `json:"disconnectGraceMs"`
+	PeerConnectionTimeoutMS      int64        `json:"peerConnectionTimeoutMs"`
 	RoomCreationPasswordRequired bool         `json:"roomCreationPasswordRequired"`
 }
 
@@ -182,6 +183,7 @@ func (s *Server) apiConfig(response http.ResponseWriter, request *http.Request) 
 		Limits:                       publicLimits{MaxMembers: s.cfg.MaxMembers, MaxRoomTTLMS: config.MaxRoomTTL.Milliseconds(), RoomTTLMS: s.cfg.RoomTTL.Milliseconds(), MaxFileSizeMB: 256},
 		HeartbeatIntervalMS:          s.cfg.HeartbeatInterval.Milliseconds(),
 		DisconnectGraceMS:            s.cfg.DisconnectGrace.Milliseconds(),
+		PeerConnectionTimeoutMS:      s.cfg.PeerConnectionTimeout.Milliseconds(),
 		RoomCreationPasswordRequired: s.cfg.RoomCreationPasswordRequired,
 	})
 }
