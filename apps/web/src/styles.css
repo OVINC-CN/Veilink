@@ -1208,10 +1208,10 @@ body { overflow: hidden; background: var(--page); }
   box-shadow: none;
   object-fit: cover;
 }
-.message-self { align-self: stretch; grid-template-columns: 38px minmax(0, 1fr); }
-.message-self .message-avatar { grid-row: auto; grid-column: auto; }
-.message-self .message-body { grid-row: auto; grid-column: auto; justify-items: start; }
-.message-self .message-body > header { flex-direction: row; }
+.message-self { align-self: stretch; grid-template-columns: minmax(0, 1fr) 38px; }
+.message-self .message-avatar { grid-row: 1; grid-column: 2; }
+.message-self .message-body { display: grid; grid-row: 1; grid-column: 1; justify-items: end; }
+.message-self .message-body > header { flex-direction: row-reverse; }
 .message-body { display: block; }
 .message-body > header { min-height: 21px; padding: 0; }
 .message-body > header strong { font-size: 13px; }
@@ -1228,7 +1228,8 @@ body { overflow: hidden; background: var(--page); }
 }
 .message-content .rich-text { color: var(--text); font-size: 14px; line-height: 1.62; }
 .message-self .rich-text, .message-self .rich-text a, .message-self .rich-text code { color: inherit; }
-.message-actions, .message-self .message-actions { top: 7px; right: 8px; left: auto; }
+.message-actions { top: 7px; right: 8px; left: auto; }
+.message-self .message-actions { right: auto; left: 8px; }
 .message-actions button { justify-content: center; border-color: var(--border); background: var(--surface-solid); box-shadow: var(--shadow-xs); line-height: 1; }
 .message-actions button svg { flex: 0 0 auto; }
 .message-context-menu { width: max-content; max-width: calc(100vw - 16px); }
@@ -1312,10 +1313,12 @@ button.message-reply-reference:hover { border-color: var(--accent); background: 
   .chat-main { padding-bottom: max(7px, env(safe-area-inset-bottom)); }
   .message-list { padding: 14px 0 22px; }
   .message { grid-template-columns: 32px minmax(0, 1fr); gap: 9px; padding: 8px 5px; }
-  .message-self { grid-template-columns: 32px minmax(0, 1fr); }
+  .message-self { grid-template-columns: minmax(0, 1fr) 32px; }
   .message .member-avatar, .member-avatar { width: 32px; height: 32px; border-radius: 8px; }
   .message-body > header { padding-right: 36px; }
-  .message-actions, .message-self .message-actions { top: 5px; right: 4px; }
+  .message-self .message-body > header { padding-right: 0; padding-left: 36px; }
+  .message-actions { top: 5px; right: 4px; }
+  .message-self .message-actions { right: auto; left: 4px; }
   .message-actions button { border: 0; background: transparent; box-shadow: none; }
   .notification-prompt { grid-template-columns: auto minmax(0, 1fr) auto; }
   .composer-toolbar { padding: 5px 7px; }
