@@ -164,7 +164,7 @@ export function RoomTopBar({
           </div>
 
           <div className="popover-anchor">
-            <button className="icon-button top-icon" type="button" aria-label={t(preferences.locale, 'settings')} aria-expanded={panel === 'settings'} onClick={() => toggle('settings')}><GearSix /></button>
+            <button className="icon-button top-icon settings-trigger" type="button" aria-label={t(preferences.locale, 'settings')} aria-expanded={panel === 'settings'} onClick={() => toggle('settings')}><GearSix /></button>
             {panel === 'settings' ? (
               <section className="popover topbar-dropdown settings-popover" aria-label={t(preferences.locale, 'settings')}>
                 <div className="popover-title"><strong>{t(preferences.locale, 'settings')}</strong><small>{zh ? '按你的习惯调整会话' : 'Tune the room to your preferences'}</small></div>

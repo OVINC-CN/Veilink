@@ -1124,6 +1124,7 @@ body { overflow: hidden; background: var(--page); }
   box-shadow: none;
   color: var(--text);
 }
+.settings-trigger[aria-expanded='true'] { background: transparent; }
 .members-trigger[aria-expanded='true'] svg:last-child { transform: rotate(180deg); }
 .members-trigger svg:last-child { transition: transform var(--ease-out); }
 .members-trigger b { font-weight: inherit; }
@@ -1174,7 +1175,8 @@ body { overflow: hidden; background: var(--page); }
   color: var(--text-secondary);
   font-size: 11px;
 }
-.number-setting { display: flex; align-items: center; gap: 5px; }
+.number-setting { display: flex; height: 32px; align-items: center; gap: 0; padding-right: 9px; border-radius: 7px; background: var(--surface-soft); }
+.settings-popover .number-setting input[type='number'] { height: 100%; border: 0; border-radius: 7px 0 0 7px; background: transparent; }
 .number-setting small { color: var(--text-tertiary); font-size: 10px; }
 .settings-popover .setting-toggle input[type='checkbox'] {
   position: relative;
