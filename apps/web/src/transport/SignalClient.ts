@@ -13,6 +13,7 @@ import {
   type Nickname,
   type RoomId,
   type ServerSignalEnvelope,
+  type SignalErrorCode,
   type ServerSignalType,
   type TurnCredentials,
 } from '@veilink/protocol'
@@ -45,6 +46,18 @@ export interface SessionConfirmation {
   selfMemberId: MemberId
   resumeToken: string
   snapshot: Extract<ServerSignalEnvelope, { type: 'room.created' | 'room.joined' | 'room.resumed' }>['payload']['snapshot']
+}
+
+export class SignalRequestError extends Error {
+  readonly code: SignalErrorCode
+  readonly retryAfterMs?: number
+
+  constructor(code: SignalErrorCode, message: string, retryAfterMs?: number) {
+    super(message)
+    this.name = 'SignalRequestError'
+    this.code = code
+    this.retryAfterMs = retryAfterMs
+  }
 }
 
 const MAX_DEFERRED_RTC_FRAMES = 512
@@ -275,10 +288,15 @@ export class SignalClient {
   }
 
   leave(): void {
-    if (this.socket?.readyState === WebSocket.OPEN) {
-      this.send({ v: PROTOCOL_VERSION, type: 'room.leave', roomId: this.roomId, payload: {} })
+    try {
+      if (this.socket?.readyState === WebSocket.OPEN) {
+        this.send({ v: PROTOCOL_VERSION, type: 'room.leave', roomId: this.roomId, payload: {} })
+      }
+    } catch {
+      // Leaving is best-effort; closing the socket still releases the server lease.
+    } finally {
+      this.close()
     }
-    this.close()
   }
 
   close(): void {
@@ -326,7 +344,9 @@ export class SignalClient {
         if (request && (request.expected.has(frame.type) || frame.type === 'error')) {
           window.clearTimeout(request.timeout)
           this.pending.delete(frame.requestId)
-          if (frame.type === 'error') request.reject(new Error(frame.payload.message))
+          if (frame.type === 'error') {
+            request.reject(new SignalRequestError(frame.payload.code, frame.payload.message, frame.payload.retryAfterMs))
+          }
           else request.resolve(frame)
           return
         }

@@ -40,6 +40,15 @@ import {
 } from './crypto/messages'
 import type { DerivedKeys, SessionIdentity } from './crypto/types'
 import { usePreferences } from './hooks/usePreferences'
+import {
+  createJoinAttempt,
+  memberIdHint,
+  sanitizeDiagnosticText,
+  type JoinAttempt,
+  type JoinFailure,
+  type JoinPeerDiagnostic,
+  type JoinStepId,
+} from './joinDiagnostics'
 import { bytesToBase64Url, randomId } from './lib/encoding'
 import type { ActiveRoom, AttachmentView, ChatMessage, Member, RichTextDocument } from './models'
 import { documentMentionsMember, notifyMention } from './mentionNotifications'
@@ -54,8 +63,8 @@ import {
   restoreReplayCounters,
   saveRecovery,
 } from './recovery'
-import { PeerMesh, type PeerSignalPayload } from './transport/PeerMesh'
-import { SignalClient, type SessionConfirmation } from './transport/SignalClient'
+import { PeerMesh, type PeerDiagnosticEvent, type PeerSignalPayload } from './transport/PeerMesh'
+import { SignalClient, SignalRequestError, type SessionConfirmation } from './transport/SignalClient'
 
 const RoomShell = lazy(async () => {
   const module = await import('./components/RoomShell')
@@ -109,6 +118,7 @@ interface SessionRuntime {
   peerConnectionTimers: Map<string, number>
   initialPeerIds: Set<string>
   initialConnectionComplete: boolean
+  initialConnectionGate?: InitialConnectionGate
   decryptors: Map<string, FileDecryptor>
   attachmentMetadata: Map<string, AttachmentMetadata>
   attachmentReservations: Map<string, number>
@@ -124,6 +134,13 @@ interface SessionRuntime {
   turnRefreshTimer?: number
 }
 
+interface InitialConnectionGate {
+  promise: Promise<void>
+  resolve: () => void
+  reject: (error: Error) => void
+  settled: boolean
+}
+
 interface PendingJoin {
   nickname: ReturnType<typeof NicknameSchema.parse>
   pin: string
@@ -131,6 +148,73 @@ interface PendingJoin {
   signal: SignalClient
   keys: DerivedKeys
   challenge: Awaited<ReturnType<SignalClient['beginJoin']>>
+}
+
+class JoinProcessError extends Error {
+  readonly code: string
+
+  constructor(code: string, message: string) {
+    super(message)
+    this.name = 'JoinProcessError'
+    this.code = code
+  }
+}
+
+const JOIN_CLIENT_CODES: Record<JoinStepId, string> = {
+  config: 'client.config_unavailable',
+  keys: 'client.key_derivation_failed',
+  signal: 'client.signaling_failed',
+  challenge: 'client.challenge_failed',
+  admission: 'client.admission_failed',
+  turn: 'client.turn_setup_failed',
+  webrtc: 'client.webrtc_initialization_failed',
+  checkpoint: 'client.checkpoint_failed',
+  peers: 'client.peer_connection_failed',
+}
+
+function joinFailure(stepId: JoinStepId, error: unknown): JoinFailure {
+  const rawError = sanitizeDiagnosticText(error)
+  if (error instanceof SignalRequestError) {
+    return {
+      stepId,
+      code: `server.${error.code}`,
+      rawError,
+      ...(error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}),
+    }
+  }
+  if (error instanceof JoinProcessError) return { stepId, code: error.code, rawError }
+  if (stepId === 'webrtc' && /WebRTC/iu.test(rawError)) {
+    return { stepId, code: 'client.webrtc_unavailable', rawError }
+  }
+  if ((stepId === 'webrtc' || stepId === 'peers') && /non-relay|relay-only|中继/iu.test(rawError)) {
+    return { stepId, code: 'client.relay_policy_rejected', rawError }
+  }
+  return { stepId, code: JOIN_CLIENT_CODES[stepId], rawError }
+}
+
+function createInitialConnectionGate(): InitialConnectionGate {
+  let resolvePromise!: () => void
+  let rejectPromise!: (error: Error) => void
+  const gate: InitialConnectionGate = {
+    promise: new Promise<void>((resolve, reject) => {
+      resolvePromise = resolve
+      rejectPromise = reject
+    }),
+    resolve: () => undefined,
+    reject: () => undefined,
+    settled: false,
+  }
+  gate.resolve = () => {
+    if (gate.settled) return
+    gate.settled = true
+    resolvePromise()
+  }
+  gate.reject = (error) => {
+    if (gate.settled) return
+    gate.settled = true
+    rejectPromise(error)
+  }
+  return gate
 }
 
 function routeRoomId(): string | undefined {
@@ -300,6 +384,7 @@ export default function App() {
   const [stage, setStage] = useState<Stage>(() => initialRoomId.current && hasRecoveryHint(initialRoomId.current) ? 'recovering' : initialRoomId.current ? 'join' : 'create')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
+  const [joinAttempt, setJoinAttempt] = useState<JoinAttempt>()
   const [room, setRoom] = useState<ActiveRoom>()
   const roomRef = useRef<ActiveRoom | undefined>(undefined)
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -309,13 +394,136 @@ export default function App() {
   const pendingJoinRef = useRef<PendingJoin | undefined>(undefined)
   const entryIdentityRef = useRef<SessionIdentity | undefined>(undefined)
   const entryIdentityGenerationRef = useRef(0)
-  const stopRuntimeRef = useRef<(sendLeave: boolean) => void>(() => undefined)
+  const stopRuntimeRef = useRef<(sendLeave: boolean, options?: { preserveInvitation?: boolean }) => void>(() => undefined)
   const persistRecoveryRef = useRef<() => Promise<boolean>>(async () => false)
   const recoveryAttemptedRef = useRef(false)
   const [createdDetails, setCreatedDetails] = useState<{ pin: string; invitation: string }>()
   const [entryIdentityPublicKey, setEntryIdentityPublicKey] = useState<string>()
   const [entryIdentityBusy, setEntryIdentityBusy] = useState(false)
   const [roomCreationPasswordRequired, setRoomCreationPasswordRequired] = useState(false)
+
+  const startJoinStep = (stepId: JoinStepId): void => {
+    const now = Date.now()
+    setJoinAttempt((current) => current ? {
+      ...current,
+      failure: undefined,
+      finishedAt: undefined,
+      steps: current.steps.map((step) => step.id === stepId
+        ? { id: step.id, status: 'active', startedAt: now }
+        : step),
+    } : current)
+  }
+
+  const completeJoinStep = (stepId: JoinStepId, skipped = false): void => {
+    const now = Date.now()
+    setJoinAttempt((current) => current ? {
+      ...current,
+      steps: current.steps.map((step) => step.id === stepId
+        ? { ...step, status: skipped ? 'skipped' : 'success', finishedAt: now }
+        : step),
+    } : current)
+  }
+
+  const failJoinStep = (stepId: JoinStepId, error: unknown): void => {
+    const now = Date.now()
+    const failure = joinFailure(stepId, error)
+    setJoinAttempt((current) => current ? {
+      ...current,
+      failure,
+      finishedAt: now,
+      steps: current.steps.map((step) => step.id === stepId
+        ? { ...step, status: 'failed', finishedAt: now, code: failure.code, rawError: failure.rawError }
+        : step),
+    } : current)
+  }
+
+  const runJoinStep = async <T,>(stepId: JoinStepId, action: () => Promise<T> | T): Promise<T> => {
+    startJoinStep(stepId)
+    try {
+      const result = await action()
+      completeJoinStep(stepId)
+      return result
+    } catch (caught) {
+      failJoinStep(stepId, caught)
+      throw caught
+    }
+  }
+
+  const initializeJoinPeers = (currentRoom: ActiveRoom): void => {
+    const now = Date.now()
+    const peers: JoinPeerDiagnostic[] = currentRoom.members
+      .filter((member) => member.id !== currentRoom.memberId)
+      .map((member) => ({
+        memberIdHint: memberIdHint(member.id),
+        nickname: member.nickname,
+        role: currentRoom.memberId < member.id ? 'offerer' : 'answerer',
+        status: 'connecting',
+        startedAt: now,
+        connectionState: 'new',
+        iceConnectionState: 'new',
+        iceGatheringState: 'new',
+        dataChannelState: 'pending',
+      }))
+    setJoinAttempt((current) => current ? { ...current, peers } : current)
+  }
+
+  const updateJoinPeer = (memberId: string, event: PeerDiagnosticEvent): void => {
+    const hint = memberIdHint(memberId)
+    const now = Date.now()
+    setJoinAttempt((current) => {
+      if (!current?.peers.some((peer) => peer.memberIdHint === hint)) return current
+      return {
+        ...current,
+        peers: current.peers.map((peer) => {
+          if (peer.memberIdHint !== hint || peer.status === 'left') return peer
+          if (event.type === 'created') {
+            return {
+              ...peer,
+              role: event.role,
+              status: 'connecting',
+              connectionState: event.connectionState,
+              iceConnectionState: event.iceConnectionState,
+              iceGatheringState: event.iceGatheringState,
+              dataChannelState: 'pending',
+            }
+          }
+          if (event.type === 'connection') {
+            return { ...peer, connectionState: event.state, status: event.state === 'failed' ? 'failed' : peer.status }
+          }
+          if (event.type === 'ice-connection') {
+            return { ...peer, iceConnectionState: event.state, status: event.state === 'failed' ? 'failed' : peer.status }
+          }
+          if (event.type === 'ice-gathering') return { ...peer, iceGatheringState: event.state }
+          if (event.type === 'channel') {
+            const ready = event.state === 'open'
+            return {
+              ...peer,
+              dataChannelState: event.state,
+              status: ready ? 'ready' : event.state === 'closed' && !current.failure ? 'connecting' : peer.status,
+              ...(ready ? { finishedAt: now } : {}),
+            }
+          }
+          return {
+            ...peer,
+            status: 'failed',
+            lastOperation: event.operation,
+            lastError: sanitizeDiagnosticText(event.error),
+          }
+        }),
+      }
+    })
+  }
+
+  const markJoinPeerLeft = (memberId: string): void => {
+    const hint = memberIdHint(memberId)
+    const now = Date.now()
+    setJoinAttempt((current) => current ? {
+      ...current,
+      peers: current.peers.map((peer) => peer.memberIdHint === hint
+        ? { ...peer, status: 'left', finishedAt: now }
+        : peer),
+    } : current)
+  }
 
   const discardEntryIdentity = useCallback((): void => {
     entryIdentityGenerationRef.current += 1
@@ -456,6 +664,7 @@ export default function App() {
     runtime.initialConnectionComplete = true
     runtime.initialPeerIds.clear()
     setTransportReady(true)
+    runtime.initialConnectionGate?.resolve()
   }
 
   const clearPeerConnectionTimer = (runtime: SessionRuntime, memberId: string): void => {
@@ -493,6 +702,16 @@ export default function App() {
         completeInitialConnectionIfReady(runtime)
         return
       }
+      const member = roomRef.current?.members.find((item) => item.id === memberId)
+      const timeoutError = new JoinProcessError(
+        'client.peer_timeout',
+        `Timed out after ${PEER_CONNECTION_TIMEOUT_MS} ms waiting for the TURN data channel${member ? ` to ${member.nickname}` : ''}`,
+      )
+      updateJoinPeer(memberId, { type: 'error', operation: 'initial-peer-timeout', error: timeoutError })
+      if (runtime.initialConnectionGate && !runtime.initialConnectionGate.settled) {
+        runtime.initialConnectionGate.reject(timeoutError)
+        return
+      }
       setError('连接超时，已自动退出，请重试。')
       stopRuntime(true)
       clearRecovery()
@@ -508,6 +727,7 @@ export default function App() {
     for (const memberId of [...runtime.initialPeerIds]) {
       if (memberIds.has(memberId)) continue
       runtime.initialPeerIds.delete(memberId)
+      markJoinPeerLeft(memberId)
       clearPeerConnectionTimer(runtime, memberId)
     }
     for (const member of members) armPeerConnectionTimer(runtime, member.id)
@@ -542,7 +762,7 @@ export default function App() {
     runtime.incomingTransferTimers.set(viewId, timer)
   }
 
-  const stopRuntime = (sendLeave: boolean): void => {
+  const stopRuntime = (sendLeave: boolean, options: { preserveInvitation?: boolean } = {}): void => {
     const runtime = runtimeRef.current
     if (runtime) {
       runtime.unsubscribe()
@@ -582,7 +802,7 @@ export default function App() {
     setMessages([])
     roomRef.current = undefined
     setRoom(undefined)
-    setLinkSecret(undefined)
+    if (!options.preserveInvitation) setLinkSecret(undefined)
     setCreatedDetails(undefined)
   }
   stopRuntimeRef.current = stopRuntime
@@ -850,11 +1070,15 @@ export default function App() {
     secret: string,
     pin: string | undefined,
     initialReplayCounters: ReadonlyMap<string, number> = new Map(),
+    trackJoin = false,
   ): Promise<ActiveRoom> => {
-    const turnCredentials = await signal.requestTurnCredentials()
+    const turnCredentials = trackJoin
+      ? await runJoinStep('turn', () => signal.requestTurnCredentials())
+      : await signal.requestTurnCredentials()
     const initialRoom = activeRoomFromSnapshot(confirmation.snapshot, confirmation.selfMemberId, keys, secret, pin)
     const runtime = {} as SessionRuntime
-    const mesh = new PeerMesh({
+    const initialConnectionGate = trackJoin ? createInitialConnectionGate() : undefined
+    const createMesh = (): PeerMesh => new PeerMesh({
       localMemberId: initialRoom.memberId,
       iceServers: turnCredentials.iceServers,
       sendSignal: (targetMemberId, payload) => {
@@ -879,9 +1103,23 @@ export default function App() {
         if (state === 'open') clearPeerConnectionTimer(runtime, memberId)
         if (state === 'closed') armPeerConnectionTimer(runtime, memberId)
       },
+      onDiagnostic: (memberId, event) => {
+        if (trackJoin) updateJoinPeer(memberId, event)
+        if (event.type !== 'error' || !runtime.initialConnectionGate || runtime.initialConnectionGate.settled) return
+        const code = event.operation === 'relay-policy-check'
+          ? 'client.relay_policy_rejected'
+          : event.operation === 'handle-signal'
+            ? 'client.webrtc_signal_failed'
+            : 'client.webrtc_operation_failed'
+        runtime.initialConnectionGate.reject(new JoinProcessError(code, sanitizeDiagnosticText(event.error)))
+      },
     })
+    const mesh = trackJoin
+      ? await runJoinStep('webrtc', createMesh)
+      : createMesh()
     const unsubscribe = signal.subscribe((frame) => {
       void handleServerFrame(frame).catch((caught: unknown) => {
+        if (runtime.initialConnectionGate) return
         setError(caught instanceof Error ? caught.message : '无法处理服务器状态更新')
         if (frame.type === 'room.resumed' || frame.type === 'room.snapshot') {
           stopRuntime(false)
@@ -907,6 +1145,7 @@ export default function App() {
         .map((member) => member.id)
         .filter((memberId) => memberId !== initialRoom.memberId)),
       initialConnectionComplete: false,
+      ...(initialConnectionGate ? { initialConnectionGate } : {}),
       decryptors: new Map(),
       attachmentMetadata: new Map(),
       attachmentReservations: new Map(),
@@ -921,11 +1160,36 @@ export default function App() {
       turnCredentialsExpiresAt: turnCredentials.expiresAt,
     } satisfies SessionRuntime)
     runtimeRef.current = runtime
-    updateRoom(initialRoom)
-    if (!await persistCurrentRecovery()) throw new Error('浏览器无法保存安全刷新检查点')
-    mesh.syncMembers(initialRoom.members)
-    armRoomConnectionTimers(runtime, initialRoom.members)
+    roomRef.current = initialRoom
+    setRoom(initialRoom)
+    const persistCheckpoint = async (): Promise<void> => {
+      if (!await persistCurrentRecovery()) {
+        if (trackJoin) {
+          throw new JoinProcessError('client.checkpoint_failed', 'The browser could not save the secure recovery checkpoint')
+        }
+        throw new Error('浏览器无法保存安全刷新检查点')
+      }
+    }
+    if (trackJoin) await runJoinStep('checkpoint', persistCheckpoint)
+    else await persistCheckpoint()
     scheduleTurnRefresh(runtime, turnCredentials)
+    if (trackJoin) {
+      initializeJoinPeers(initialRoom)
+      startJoinStep('peers')
+      try {
+        mesh.syncMembers(initialRoom.members)
+        armRoomConnectionTimers(runtime, initialRoom.members)
+        await initialConnectionGate?.promise
+        completeJoinStep('peers', initialRoom.members.length === 1)
+        delete runtime.initialConnectionGate
+      } catch (caught) {
+        failJoinStep('peers', caught)
+        throw caught
+      }
+    } else {
+      mesh.syncMembers(initialRoom.members)
+      armRoomConnectionTimers(runtime, initialRoom.members)
+    }
     return initialRoom
   }
 
@@ -1011,6 +1275,7 @@ export default function App() {
       return
     }
     if (frame.type === 'room.member.left') {
+      markJoinPeerLeft(frame.payload.memberId)
       runtime.initialPeerIds.delete(frame.payload.memberId)
       updateRoom((value) => ({ ...value, members: value.members.filter((member) => member.id !== frame.payload.memberId) }))
       clearPeerConnectionTimer(runtime, frame.payload.memberId)
@@ -1053,6 +1318,10 @@ export default function App() {
       return
     }
     if (frame.type === 'room.ended') {
+      if (runtime.initialConnectionGate && !runtime.initialConnectionGate.settled) {
+        runtime.initialConnectionGate.reject(new JoinProcessError('server.room_ended', `Room ended: ${frame.payload.reason}`))
+        return
+      }
       stopRuntime(false)
       clearRecovery()
       setError(`连接已结束：${frame.payload.reason}`)
@@ -1061,6 +1330,10 @@ export default function App() {
       return
     }
     if (frame.type === 'error') {
+      if (runtime.initialConnectionGate && !runtime.initialConnectionGate.settled) {
+        runtime.initialConnectionGate.reject(new JoinProcessError(`server.${frame.payload.code}`, frame.payload.message))
+        return
+      }
       setError(frame.payload.message)
       if (frame.payload.code === 'resume_rejected' || frame.payload.code === 'member_not_found') {
         stopRuntime(false)
@@ -1130,70 +1403,73 @@ export default function App() {
     }
   }
 
-  const finishPendingJoin = async (): Promise<void> => {
-    const pending = pendingJoinRef.current
-    if (!pending) return
-    setBusy(true)
-    setError(undefined)
-    let joined = false
-    try {
-      const confirmation = await pending.signal.finishJoin({
-        nickname: pending.nickname,
-        identityPublicKey: IdentityPublicKeySchema.parse(bytesToBase64Url(pending.identity.publicKey)),
-        admissionKey: pending.keys.admissionKey,
-        challengeId: pending.challenge.challengeId,
-        challenge: pending.challenge.challenge,
-      })
-      joined = true
-      await setupRuntime(confirmation, pending.signal, pending.identity, pending.keys, linkSecret!, pending.pin)
-      rememberNickname(pending.nickname)
-      pendingJoinRef.current = undefined
-      setStage('room')
-      void persistCurrentRecovery()
-    } catch (caught) {
-      if (runtimeRef.current?.identity === pending.identity) {
-        pendingJoinRef.current = undefined
-        stopRuntime(true)
-      } else {
-        if (joined) pending.signal.leave()
-        disposePendingJoin(pending)
-        pendingJoinRef.current = undefined
-      }
-      setError(caught instanceof Error ? caught.message : '加入失败')
-      setStage('join')
-    } finally {
-      setBusy(false)
-    }
-  }
-
   const joinRoom = async (rawNickname: string, pin: string): Promise<void> => {
     if (!initialRoomId.current || !linkSecret) return
+    let nickname: ReturnType<typeof NicknameSchema.parse>
+    try {
+      nickname = NicknameSchema.parse(rawNickname)
+    } catch (caught) {
+      setJoinAttempt(undefined)
+      setError(caught instanceof Error ? caught.message : '昵称无效')
+      return
+    }
     const entryIdentity = takeEntryIdentity()
     if (!entryIdentity) {
       setError('随机头像仍在生成，请稍候重试。')
       return
     }
+    const roomId = initialRoomId.current
+    const secret = linkSecret
+    setJoinAttempt(createJoinAttempt())
     setBusy(true)
     setError(undefined)
     let keys: DerivedKeys | undefined
     let identity: SessionIdentity | undefined = entryIdentity
     let signal: SignalClient | undefined
+    let joined = false
     try {
-      const nickname = NicknameSchema.parse(rawNickname)
-      const publicConfig = await loadPublicConfig()
-      keys = await deriveRoomKeys(pin, initialRoomId.current, linkSecret)
-      signal = new SignalClient(initialRoomId.current, publicConfig.disconnectGraceMs)
-      const challenge = await signal.beginJoin(nickname, IdentityPublicKeySchema.parse(bytesToBase64Url(identity.publicKey)))
+      const publicConfig = await runJoinStep('config', loadPublicConfig)
+      keys = await runJoinStep('keys', () => deriveRoomKeys(pin, roomId, secret))
+      signal = new SignalClient(roomId, publicConfig.disconnectGraceMs)
+      await runJoinStep('signal', () => signal!.connect())
+      const identityPublicKey = IdentityPublicKeySchema.parse(bytesToBase64Url(identity.publicKey))
+      const challenge = await runJoinStep('challenge', () => signal!.beginJoin(nickname, identityPublicKey))
       pendingJoinRef.current = { nickname, pin, identity, signal, keys, challenge }
-      keys = undefined
+      const confirmation = await runJoinStep('admission', () => signal!.finishJoin({
+        nickname,
+        identityPublicKey,
+        admissionKey: keys!.admissionKey,
+        challengeId: challenge.challengeId,
+        challenge: challenge.challenge,
+      }))
+      joined = true
+      await setupRuntime(confirmation, signal, identity, keys, secret, pin, new Map(), true)
+      pendingJoinRef.current = undefined
+      rememberNickname(nickname)
       identity = undefined
+      keys = undefined
       signal = undefined
-      await finishPendingJoin()
-    } catch (caught) {
-      signal?.close()
+      setJoinAttempt((current) => current ? { ...current, finishedAt: Date.now() } : current)
+      setStage('room')
+      void persistCurrentRecovery()
+    } catch {
+      pendingJoinRef.current = undefined
+      if (identity && runtimeRef.current?.identity === identity) {
+        stopRuntime(true, { preserveInvitation: true })
+        identity = undefined
+        keys = undefined
+        signal = undefined
+      } else {
+        if (joined) signal?.leave()
+        else signal?.close()
+      }
       if (identity) destroyIdentity(identity)
       if (keys) wipeKeys(keys)
-      setError(caught instanceof Error ? caught.message : '加入失败')
+      clearRecovery()
+      initialRoomId.current = roomId
+      setLinkSecret(secret)
+      window.history.replaceState(window.history.state, '', `/room/${roomId}`)
+      setStage('join')
     } finally {
       setBusy(false)
     }
@@ -1388,7 +1664,7 @@ export default function App() {
   return (
     <EntryShell preferences={preferences} onPreferences={setPreferences}>
       {stage === 'create' ? <CreateRoomView preferences={preferences} busy={busy} avatarSeed={entryIdentityPublicKey} avatarBusy={entryIdentityBusy} creationPasswordRequired={roomCreationPasswordRequired} error={error} onRegenerateAvatar={regenerateEntryIdentity} onCreate={createRoom} /> : null}
-      {stage === 'join' ? <JoinRoomView preferences={preferences} hasLinkSecret={Boolean(linkSecret)} busy={busy} avatarSeed={entryIdentityPublicKey} avatarBusy={entryIdentityBusy} error={error} onRegenerateAvatar={regenerateEntryIdentity} onJoin={joinRoom} /> : null}
+      {stage === 'join' ? <JoinRoomView preferences={preferences} hasLinkSecret={Boolean(linkSecret)} busy={busy} avatarSeed={entryIdentityPublicKey} avatarBusy={entryIdentityBusy} error={error} joinAttempt={joinAttempt} onRegenerateAvatar={regenerateEntryIdentity} onJoin={joinRoom} /> : null}
       {stage === 'created' && createdDetails ? <RoomCreatedView pin={createdDetails.pin} invitation={createdDetails.invitation} preferences={preferences} onContinue={() => { setCreatedDetails(undefined); setStage('room') }} /> : null}
     </EntryShell>
   )

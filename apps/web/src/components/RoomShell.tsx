@@ -285,7 +285,7 @@ export function RoomShell(props: RoomShellProps) {
                 <MemberAvatar seed={message.senderIdentityPublicKey} className="message-avatar" />
                 <div className="message-body">
                   <header>
-                    <strong>{isSelf ? (preferences.locale === 'zh-CN' ? '你' : 'You') : message.senderName}</strong>
+                    <strong>{message.senderName}</strong>
                     {preferences.showTimestamps ? <time dateTime={new Date(message.sentAt).toISOString()}>{formatTime(message.sentAt, preferences.locale)}</time> : null}
                   </header>
                   <div className="message-content">

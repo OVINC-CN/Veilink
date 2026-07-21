@@ -57,7 +57,7 @@ describe('minimal entry experience', () => {
 })
 
 describe('room workspace layout', () => {
-  it('exposes relay-only connection details without participant IP metadata', () => {
+  it('keeps member navigation focused and shows room timing in the top bar', () => {
     const preferences = { ...defaultPreferences(), locale: 'zh-CN' as const }
     const room: ActiveRoom = {
       roomId: 'room-id',
@@ -109,15 +109,17 @@ describe('room workspace layout', () => {
     expect(screen.queryByRole('navigation', { name: '房间视图' })).not.toBeInTheDocument()
     expect(screen.queryByRole('complementary', { name: 'Veilink 导航' })).not.toBeInTheDocument()
     expect(screen.queryByText('Cloudflare TURN 中继')).not.toBeInTheDocument()
+    expect(screen.getByLabelText(/临时会话 MNOP，剩余/u)).toBeInTheDocument()
 
-    const membersButton = screen.getByRole('button', { name: /成员与连接，2 人在线/u })
+    const membersButton = screen.getByRole('button', { name: /成员，2 人在线/u })
     expect(membersButton).toHaveAttribute('aria-expanded', 'false')
     fireEvent.click(membersButton)
     expect(membersButton).toHaveAttribute('aria-expanded', 'true')
 
     const detailsPanel = screen.getByRole('region', { name: '人员列表' })
-    expect(within(detailsPanel).getByText('Cloudflare TURN 中继')).toBeInTheDocument()
-    expect(within(detailsPanel).getByText('仅允许中继')).toBeInTheDocument()
+    expect(within(detailsPanel).queryByText('Cloudflare TURN 中继')).not.toBeInTheDocument()
+    expect(within(detailsPanel).queryByText('连接状态')).not.toBeInTheDocument()
+    expect(within(detailsPanel).queryByText('房间信息')).not.toBeInTheDocument()
     expect(within(detailsPanel).getByText('Mira（你）')).toBeInTheDocument()
     expect(within(detailsPanel).getByText('River')).toBeInTheDocument()
     expect(within(detailsPanel).queryByText(/公网 IP/u)).not.toBeInTheDocument()

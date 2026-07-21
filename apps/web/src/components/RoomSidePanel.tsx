@@ -1,10 +1,4 @@
 import {
-  CheckCircle,
-  ClockCountdown,
-  Fingerprint,
-  LockKey,
-  PlugsConnected,
-  ShieldCheck,
   WarningOctagon,
   X,
 } from '@phosphor-icons/react'
@@ -13,31 +7,14 @@ import type { ActiveRoom } from '../models'
 import type { Preferences } from '../preferences'
 import { MemberAvatar } from './MemberAvatar'
 
-function formatRemaining(expiresAt: number): string {
-  const seconds = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000))
-  const hours = Math.floor(seconds / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-  const rest = seconds % 60
-  return [hours, minutes, rest].map((value) => String(value).padStart(2, '0')).join(':')
-}
-
-export function RoomConnectionDetails({
+export function RoomMemberList({
   room,
   preferences,
-  connectionState,
 }: {
   room: ActiveRoom
   preferences: Preferences
-  connectionState: 'connecting' | 'ready'
 }) {
-  const [remaining, setRemaining] = useState(() => formatRemaining(room.expiresAt))
   const zh = preferences.locale === 'zh-CN'
-  const fingerprintSuffix = room.fingerprint.replaceAll(' ', '').slice(-4).toUpperCase()
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setRemaining(formatRemaining(room.expiresAt)), 1_000)
-    return () => window.clearInterval(timer)
-  }, [room.expiresAt])
 
   return (
     <div className="room-details-content">
@@ -54,33 +31,12 @@ export function RoomConnectionDetails({
               <span className="avatar-presence"><MemberAvatar seed={member.identityPublicKey} /><i /></span>
               <span className="member-copy">
                 <strong>{member.nickname}{member.id === room.memberId ? (zh ? '（你）' : ' (you)') : ''}</strong>
-                <small>{member.isOwner ? (zh ? '房间发起人' : 'Room host') : (zh ? '已安全连接' : 'Securely connected')}</small>
+                <small>{member.isOwner ? (zh ? '房间发起人' : 'Room host') : (zh ? '房间成员' : 'Room member')}</small>
               </span>
               {member.id === room.memberId ? <span className="self-chip">{zh ? '本设备' : 'This device'}</span> : null}
             </li>
           ))}
       </ul>
-
-      <section className="room-details-section" aria-labelledby="connection-details-heading">
-        <div className="room-details-title">
-          <strong id="connection-details-heading">{zh ? '连接状态' : 'Connection status'}</strong>
-          <PlugsConnected />
-        </div>
-        <ul className="connection-facts">
-          <li><CheckCircle weight="fill" /><span><strong>{zh ? 'Cloudflare TURN 中继' : 'Cloudflare TURN relay'}</strong><small>{connectionState === 'ready' ? (zh ? '已连接' : 'Connected') : (zh ? '建立中' : 'Connecting')}</small></span></li>
-          <li><ShieldCheck weight="fill" /><span><strong>{zh ? '端到端加密' : 'End-to-end encrypted'}</strong><small>{zh ? '已启用' : 'Enabled'}</small></span></li>
-          <li><LockKey weight="fill" /><span><strong>{zh ? '仅允许中继' : 'Relay only'}</strong><small>{zh ? '已强制' : 'Enforced'}</small></span></li>
-        </ul>
-        <p className="connection-explainer">{zh ? '聊天和文件经 Cloudflare TURN 中继传输；应用层内容保持端到端加密，不会降级为直连。' : 'Chats and files use Cloudflare TURN relays; application content remains end-to-end encrypted and never falls back to a direct path.'}</p>
-      </section>
-
-      <section className="room-details-section room-information" aria-labelledby="room-information-heading">
-        <div className="room-details-title"><strong id="room-information-heading">{zh ? '房间信息' : 'Room information'}</strong></div>
-        <dl>
-          <div><dt><ClockCountdown />{zh ? '剩余时间' : 'Time remaining'}</dt><dd>{remaining}</dd></div>
-          <div><dt><Fingerprint />{zh ? '密钥指纹' : 'Key fingerprint'}</dt><dd>{fingerprintSuffix}</dd></div>
-        </dl>
-      </section>
     </div>
   )
 }

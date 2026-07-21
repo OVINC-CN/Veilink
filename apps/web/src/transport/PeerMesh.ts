@@ -5,6 +5,20 @@ export interface PeerSignalPayload {
   candidate?: RTCIceCandidateInit
 }
 
+export type PeerDiagnosticEvent =
+  | {
+    type: 'created'
+    role: 'offerer' | 'answerer'
+    connectionState: RTCPeerConnectionState
+    iceConnectionState: RTCIceConnectionState
+    iceGatheringState: RTCIceGatheringState
+  }
+  | { type: 'connection'; state: RTCPeerConnectionState }
+  | { type: 'ice-connection'; state: RTCIceConnectionState }
+  | { type: 'ice-gathering'; state: RTCIceGatheringState }
+  | { type: 'channel'; state: RTCDataChannelState }
+  | { type: 'error'; operation: string; error: Error }
+
 interface PeerRecord {
   connection: RTCPeerConnection
   channel?: RTCDataChannel
@@ -26,6 +40,7 @@ export interface PeerMeshOptions {
   onData: (sourceMemberId: string, data: string | ArrayBuffer) => void
   onConnectionChange?: (memberId: string, state: RTCPeerConnectionState) => void
   onChannelChange?: (memberId: string, state: RTCDataChannelState) => void
+  onDiagnostic?: (memberId: string, event: PeerDiagnosticEvent) => void
 }
 
 const MAX_PENDING_CANDIDATES = 64
@@ -134,34 +149,42 @@ export class PeerMesh {
         const peer = this.createPeer(memberId)
         const channel = peer.connection.createDataChannel('veilink', { ordered: true })
         this.attachChannel(memberId, peer, channel)
-        void this.createOffer(memberId, peer).catch(() => this.failPeer(memberId, peer))
+        void this.createOffer(memberId, peer).catch((error: unknown) => {
+          this.reportError(memberId, 'create-offer', error)
+          this.failPeer(memberId, peer)
+        })
       }
     }
   }
 
   async handleSignal(sourceMemberId: string, payload: PeerSignalPayload): Promise<void> {
-    if (payload.description && !relayDescription(payload.description)) throw new Error('Non-relay or malformed ICE description rejected')
-    if (payload.candidate && !relayCandidate(payload.candidate)) throw new Error('Non-relay or malformed ICE candidate rejected')
-    const peer = this.peers.get(sourceMemberId) ?? this.createPeer(sourceMemberId)
-    if (payload.description) {
-      await peer.connection.setRemoteDescription(payload.description)
-      for (const candidate of peer.pendingCandidates.splice(0)) await peer.connection.addIceCandidate(candidate)
-      if (payload.description.type === 'offer') {
-        const answer = await peer.connection.createAnswer()
-        await peer.connection.setLocalDescription(answer)
-        if (!relayDescription(answer)) throw new Error('Browser produced a non-relay ICE answer')
-        this.options.sendSignal(sourceMemberId, { description: answer })
-      }
-    }
-    if (payload.candidate) {
-      if (peer.connection.remoteDescription) await peer.connection.addIceCandidate(payload.candidate)
-      else {
-        if (peer.pendingCandidates.length >= MAX_PENDING_CANDIDATES) {
-          this.removePeer(sourceMemberId)
-          throw new Error('Too many ICE candidates arrived before the remote description')
+    try {
+      if (payload.description && !relayDescription(payload.description)) throw new Error('Non-relay or malformed ICE description rejected')
+      if (payload.candidate && !relayCandidate(payload.candidate)) throw new Error('Non-relay or malformed ICE candidate rejected')
+      const peer = this.peers.get(sourceMemberId) ?? this.createPeer(sourceMemberId)
+      if (payload.description) {
+        await peer.connection.setRemoteDescription(payload.description)
+        for (const candidate of peer.pendingCandidates.splice(0)) await peer.connection.addIceCandidate(candidate)
+        if (payload.description.type === 'offer') {
+          const answer = await peer.connection.createAnswer()
+          await peer.connection.setLocalDescription(answer)
+          if (!relayDescription(answer)) throw new Error('Browser produced a non-relay ICE answer')
+          this.options.sendSignal(sourceMemberId, { description: answer })
         }
-        peer.pendingCandidates.push(payload.candidate)
       }
+      if (payload.candidate) {
+        if (peer.connection.remoteDescription) await peer.connection.addIceCandidate(payload.candidate)
+        else {
+          if (peer.pendingCandidates.length >= MAX_PENDING_CANDIDATES) {
+            this.removePeer(sourceMemberId)
+            throw new Error('Too many ICE candidates arrived before the remote description')
+          }
+          peer.pendingCandidates.push(payload.candidate)
+        }
+      }
+    } catch (error) {
+      this.reportError(sourceMemberId, 'handle-signal', error)
+      throw error
     }
   }
 
@@ -212,6 +235,13 @@ export class PeerMesh {
     const connection = new this.peerConnectionConstructor(rtcConfiguration(this.iceServers))
     const peer: PeerRecord = { connection, pendingCandidates: [], ready: false }
     this.peers.set(memberId, peer)
+    this.options.onDiagnostic?.(memberId, {
+      type: 'created',
+      role: localMemberOffers(this.options.localMemberId, memberId) ? 'offerer' : 'answerer',
+      connectionState: connection.connectionState,
+      iceConnectionState: connection.iceConnectionState,
+      iceGatheringState: connection.iceGatheringState,
+    })
     connection.addEventListener('icecandidate', (event) => {
       if (!event.candidate) return
       const candidate = event.candidate.toJSON()
@@ -219,9 +249,23 @@ export class PeerMesh {
     })
     connection.addEventListener('datachannel', (event) => this.attachChannel(memberId, peer, event.channel))
     connection.addEventListener('connectionstatechange', () => {
+      this.options.onDiagnostic?.(memberId, { type: 'connection', state: connection.connectionState })
       this.options.onConnectionChange?.(memberId, connection.connectionState)
-      if (connection.connectionState === 'failed') this.failPeer(memberId, peer)
+      if (connection.connectionState === 'failed') {
+        this.reportError(memberId, 'peer-connection', new Error('RTCPeerConnection failed'))
+        this.failPeer(memberId, peer)
+      }
       if (connection.connectionState === 'closed' && this.peers.get(memberId) === peer) this.removePeer(memberId)
+    })
+    connection.addEventListener('iceconnectionstatechange', () => {
+      this.options.onDiagnostic?.(memberId, { type: 'ice-connection', state: connection.iceConnectionState })
+      if (connection.iceConnectionState === 'failed') {
+        this.reportError(memberId, 'ice-connection', new Error('ICE connection failed'))
+        this.failPeer(memberId, peer)
+      }
+    })
+    connection.addEventListener('icegatheringstatechange', () => {
+      this.options.onDiagnostic?.(memberId, { type: 'ice-gathering', state: connection.iceGatheringState })
     })
     return peer
   }
@@ -231,16 +275,29 @@ export class PeerMesh {
     peer.channel = channel
     peer.ready = false
     channel.binaryType = 'arraybuffer'
+    this.options.onDiagnostic?.(memberId, { type: 'channel', state: channel.readyState })
     channel.addEventListener('open', () => {
       peer.ready = true
+      this.options.onDiagnostic?.(memberId, { type: 'channel', state: 'open' })
       this.options.onChannelChange?.(memberId, 'open')
       void selectedPairIsExplicitlyNonRelay(peer.connection).then((invalid) => {
-        if (invalid && this.peers.get(memberId) === peer) this.failPeer(memberId, peer)
+        if (invalid && this.peers.get(memberId) === peer) {
+          this.reportError(memberId, 'relay-policy-check', new Error('Selected ICE candidate pair is not relay-only'))
+          this.failPeer(memberId, peer)
+        }
       })
     })
     channel.addEventListener('close', () => {
+      const closedBeforeReady = !peer.ready
       peer.ready = false
+      this.options.onDiagnostic?.(memberId, { type: 'channel', state: channel.readyState })
       this.options.onChannelChange?.(memberId, channel.readyState)
+      if (closedBeforeReady && this.peers.get(memberId) === peer && peer.channel === channel) {
+        this.reportError(memberId, 'data-channel-closed', new Error('RTC data channel closed before opening'))
+      }
+    })
+    channel.addEventListener('error', () => {
+      this.reportError(memberId, 'data-channel', new Error('RTC data channel error'))
     })
     channel.addEventListener('message', (event: MessageEvent<string | ArrayBuffer>) => {
       if (peer.ready) this.options.onData(memberId, event.data)
@@ -259,5 +316,13 @@ export class PeerMesh {
     await peer.connection.setLocalDescription(offer)
     if (!relayDescription(offer)) throw new Error('Browser produced a non-relay ICE offer')
     this.options.sendSignal(memberId, { description: offer })
+  }
+
+  private reportError(memberId: string, operation: string, error: unknown): void {
+    this.options.onDiagnostic?.(memberId, {
+      type: 'error',
+      operation,
+      error: error instanceof Error ? error : new Error('Unknown WebRTC error'),
+    })
   }
 }

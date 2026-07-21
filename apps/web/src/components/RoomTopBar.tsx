@@ -23,7 +23,7 @@ import { mentionNotificationAvailability, requestMentionNotificationPermission }
 import type { ActiveRoom } from '../models'
 import type { Preferences } from '../preferences'
 import { Brand } from './Brand'
-import { DestroyRoomDialog, RoomConnectionDetails } from './RoomSidePanel'
+import { DestroyRoomDialog, RoomMemberList } from './RoomSidePanel'
 
 type Panel = 'details' | 'settings' | 'more' | null
 
@@ -34,6 +34,14 @@ interface RoomTopBarProps {
   onPreferences: (next: Preferences) => void
   onLeave: () => void
   onDestroy: () => Promise<void> | void
+}
+
+function formatRemaining(expiresAt: number): string {
+  const seconds = Math.max(0, Math.floor((expiresAt - Date.now()) / 1_000))
+  const hours = Math.floor(seconds / 3_600)
+  const minutes = Math.floor((seconds % 3_600) / 60)
+  const rest = seconds % 60
+  return [hours, minutes, rest].map((value) => String(value).padStart(2, '0')).join(':')
 }
 
 export function RoomTopBar({
@@ -48,6 +56,7 @@ export function RoomTopBar({
   const [destroyOpen, setDestroyOpen] = useState(false)
   const [copied, setCopied] = useState<'link' | 'pin' | null>(null)
   const [requestingNotifications, setRequestingNotifications] = useState(false)
+  const [remaining, setRemaining] = useState(() => formatRemaining(room.expiresAt))
   const root = useRef<HTMLElement>(null)
   const self = room.members.find((member) => member.id === room.memberId)
   const zh = preferences.locale === 'zh-CN'
@@ -71,6 +80,12 @@ export function RoomTopBar({
       document.removeEventListener('keydown', escape)
     }
   }, [])
+
+  useEffect(() => {
+    setRemaining(formatRemaining(room.expiresAt))
+    const timer = window.setInterval(() => setRemaining(formatRemaining(room.expiresAt)), 1_000)
+    return () => window.clearInterval(timer)
+  }, [room.expiresAt])
 
   const toggle = (next: Exclude<Panel, null>): void => setPanel((current) => current === next ? null : next)
 
@@ -101,20 +116,23 @@ export function RoomTopBar({
     <header className="topbar" ref={root}>
       <div className="topbar-inner">
         <div className="topbar-brand"><Brand /></div>
-        <div className="topbar-room-label" aria-label={zh ? `临时会话 ${roomLabel}` : `Temporary room ${roomLabel}`}>
-          <span className={`presence-dot${connectionState === 'ready' ? ' is-ready' : ''}`} aria-hidden="true" />
-          <span>{zh ? '临时会话' : 'Temporary room'}</span>
-          <code>{roomLabel}</code>
+        <div className="topbar-room-label" aria-label={zh ? `临时会话 ${roomLabel}，剩余 ${remaining}` : `Temporary room ${roomLabel}, ${remaining} remaining`}>
+          <span className="topbar-room-primary">
+            <span className={`presence-dot${connectionState === 'ready' ? ' is-ready' : ''}`} aria-hidden="true" />
+            <span className="topbar-room-kind">{zh ? '临时会话' : 'Temporary room'}</span>
+            <code>{roomLabel}</code>
+          </span>
+          <small><span>{zh ? '剩余' : 'Remaining'}</span><time dateTime={`PT${Math.max(0, Math.floor((room.expiresAt - Date.now()) / 1_000))}S`}>{remaining}</time></small>
         </div>
 
         <nav className="top-actions" aria-label={zh ? '房间操作' : 'Room controls'}>
           <div className="popover-anchor members-popover-anchor">
-            <button className="top-action members-trigger" type="button" aria-label={zh ? `成员与连接，${room.members.length} 人在线` : `Members and connection, ${room.members.length} online`} aria-expanded={panel === 'details'} onClick={() => toggle('details')}>
-              <Users /><span>{room.members.length} {zh ? '人在线' : 'online'}</span><CaretDown />
+            <button className="top-action members-trigger" type="button" aria-label={zh ? `成员，${room.members.length} 人在线` : `Members, ${room.members.length} online`} aria-expanded={panel === 'details'} onClick={() => toggle('details')}>
+              <Users /><span><b>{room.members.length}</b><span className="members-online-label"> {zh ? '人在线' : 'online'}</span></span><CaretDown />
             </button>
             {panel === 'details' ? (
               <section className="popover topbar-dropdown details-popover" aria-label={zh ? '人员列表' : 'Members'}>
-                <RoomConnectionDetails room={room} preferences={preferences} connectionState={connectionState} />
+                <RoomMemberList room={room} preferences={preferences} />
               </section>
             ) : null}
           </div>
