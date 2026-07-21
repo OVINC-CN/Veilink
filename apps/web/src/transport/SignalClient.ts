@@ -24,6 +24,11 @@ interface PendingRequest {
   timeout: number
 }
 
+interface DeferredRtcFrame {
+  frame: Extract<ServerSignalEnvelope, { type: 'rtc.description' | 'rtc.candidate' }>
+  bytes: number
+}
+
 interface ResumeState {
   memberId: MemberId
   resumeToken: string
@@ -41,6 +46,10 @@ export interface SessionConfirmation {
   resumeToken: string
   snapshot: Extract<ServerSignalEnvelope, { type: 'room.created' | 'room.joined' | 'room.resumed' }>['payload']['snapshot']
 }
+
+const MAX_DEFERRED_RTC_FRAMES = 512
+const MAX_DEFERRED_RTC_BYTES = 2 * 1024 * 1024
+const signalEncoder = new TextEncoder()
 
 function socketUrl(): string {
   const url = new URL('/signal', window.location.origin)
@@ -76,6 +85,9 @@ export class SignalClient {
   private connectPromise?: Promise<void>
   private readonly pending = new Map<string, PendingRequest>()
   private readonly listeners = new Set<(frame: ServerSignalEnvelope) => void>()
+  private readonly deferredRtcFrames: DeferredRtcFrame[] = []
+  private deferredRtcBytes = 0
+  private deferredRtcFlushScheduled = false
   private heartbeatTimer?: number
   private reconnectTimer?: number
   private reconnectStartedAt?: number
@@ -110,6 +122,7 @@ export class SignalClient {
       socket.addEventListener('message', (event) => this.handleMessage(event.data))
       socket.addEventListener('close', () => {
         this.stopHeartbeat()
+        this.clearDeferredRtcFrames()
         for (const request of this.pending.values()) {
           window.clearTimeout(request.timeout)
           request.reject(new Error('Signaling connection closed'))
@@ -125,6 +138,7 @@ export class SignalClient {
 
   subscribe(listener: (frame: ServerSignalEnvelope) => void): () => void {
     this.listeners.add(listener)
+    this.scheduleDeferredRtcFlush()
     return () => this.listeners.delete(listener)
   }
 
@@ -270,6 +284,7 @@ export class SignalClient {
   close(): void {
     this.closed = true
     this.stopHeartbeat()
+    this.clearDeferredRtcFrames()
     if (this.reconnectTimer !== undefined) window.clearTimeout(this.reconnectTimer)
     this.reconnectTimer = undefined
     this.reconnectStartedAt = undefined
@@ -316,10 +331,70 @@ export class SignalClient {
           return
         }
       }
-      for (const listener of this.listeners) listener(frame)
+      if (
+        (frame.type === 'rtc.description' || frame.type === 'rtc.candidate') &&
+        frame.roomId === this.roomId &&
+        (this.listeners.size === 0 || this.deferredRtcFrames.length > 0)
+      ) {
+        this.deferRtcFrame(frame, signalEncoder.encode(raw).byteLength)
+        return
+      }
+      this.notifyListeners(frame)
     } catch {
       // Invalid or oversized frames are ignored; the server cannot force unvalidated state into the client.
     }
+  }
+
+  private deferRtcFrame(frame: DeferredRtcFrame['frame'], bytes: number): void {
+    if (
+      this.deferredRtcFrames.length >= MAX_DEFERRED_RTC_FRAMES ||
+      this.deferredRtcBytes + bytes > MAX_DEFERRED_RTC_BYTES
+    ) {
+      this.failDeferredRtcBuffer()
+      return
+    }
+    this.deferredRtcFrames.push({ frame, bytes })
+    this.deferredRtcBytes += bytes
+    this.scheduleDeferredRtcFlush()
+  }
+
+  private scheduleDeferredRtcFlush(): void {
+    if (
+      this.deferredRtcFlushScheduled ||
+      this.listeners.size === 0 ||
+      this.deferredRtcFrames.length === 0
+    ) return
+    this.deferredRtcFlushScheduled = true
+    window.queueMicrotask(() => {
+      this.deferredRtcFlushScheduled = false
+      if (this.listeners.size === 0) return
+      const deferred = this.deferredRtcFrames.splice(0)
+      this.deferredRtcBytes = 0
+      for (const { frame } of deferred) this.notifyListeners(frame)
+    })
+  }
+
+  private failDeferredRtcBuffer(): void {
+    const error = new Error('Too many RTC signals arrived before connection initialization')
+    this.clearDeferredRtcFrames()
+    this.closed = true
+    this.stopHeartbeat()
+    this.resumeState = undefined
+    for (const request of this.pending.values()) {
+      window.clearTimeout(request.timeout)
+      request.reject(error)
+    }
+    this.pending.clear()
+    this.socket?.close(1009, 'deferred RTC signaling overflow')
+  }
+
+  private clearDeferredRtcFrames(): void {
+    this.deferredRtcFrames.length = 0
+    this.deferredRtcBytes = 0
+  }
+
+  private notifyListeners(frame: ServerSignalEnvelope): void {
+    for (const listener of this.listeners) listener(frame)
   }
 
   private startHeartbeat(): void {
@@ -373,7 +448,7 @@ export class SignalClient {
       }
       this.reconnectStartedAt = undefined
       this.startHeartbeat()
-      for (const listener of this.listeners) listener(response)
+      this.notifyListeners(response)
     } catch {
       this.socket?.close()
       this.scheduleReconnect()
@@ -384,6 +459,7 @@ export class SignalClient {
     if (this.closed) return
     this.closed = true
     this.stopHeartbeat()
+    this.clearDeferredRtcFrames()
     this.resumeState = undefined
     this.reconnectStartedAt = undefined
     this.socket?.close()
@@ -397,6 +473,6 @@ export class SignalClient {
         message: 'The secure connection could not be restored.',
       },
     }
-    for (const listener of this.listeners) listener(frame)
+    this.notifyListeners(frame)
   }
 }

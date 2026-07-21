@@ -23,6 +23,10 @@ export interface PeerMeshOptions {
 
 const MAX_PENDING_CANDIDATES = 64
 
+function localMemberOffers(localMemberId: string, remoteMemberId: string): boolean {
+  return localMemberId < remoteMemberId
+}
+
 function turnOnlyServers(servers: RTCIceServer[]): RTCIceServer[] {
   return servers.flatMap((server) => {
     const urls = (Array.isArray(server.urls) ? server.urls : [server.urls])
@@ -106,7 +110,7 @@ export class PeerMesh {
       if (!remoteIds.has(memberId)) this.removePeer(memberId)
     }
     for (const memberId of remoteIds) {
-      if (!this.peers.has(memberId) && this.options.localMemberId.localeCompare(memberId) < 0) {
+      if (!this.peers.has(memberId) && localMemberOffers(this.options.localMemberId, memberId)) {
         const peer = this.createPeer(memberId)
         const channel = peer.connection.createDataChannel('veilink', { ordered: true })
         this.attachChannel(memberId, peer, channel)
@@ -169,7 +173,7 @@ export class PeerMesh {
     this.iceServers = next
     for (const peer of this.peers.values()) peer.connection.setConfiguration(rtcConfiguration(this.iceServers))
     await Promise.all([...this.peers.entries()]
-      .filter(([memberId]) => this.options.localMemberId.localeCompare(memberId) < 0)
+      .filter(([memberId]) => localMemberOffers(this.options.localMemberId, memberId))
       .map(async ([memberId, peer]) => this.createOffer(memberId, peer, true)))
   }
 

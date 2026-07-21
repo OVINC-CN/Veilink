@@ -655,14 +655,24 @@ func (s *Server) dispatch(event store.Event) {
 		connections = append(connections, current)
 	}
 	s.connectionsMu.RUnlock()
+	frame := event.Wire.Event
+	frame.RoomID = event.Wire.RoomID
 	for _, current := range connections {
 		currentBinding := current.getBinding()
-		if currentBinding == nil || currentBinding.RoomID != event.Wire.RoomID || event.Wire.ExcludedMemberID == currentBinding.MemberID || (event.Wire.TargetMemberID != "" && event.Wire.TargetMemberID != currentBinding.MemberID) || (event.Wire.TargetSessionID != "" && event.Wire.TargetSessionID != currentBinding.SessionID) {
+		prebindRTCTarget := currentBinding == nil &&
+			event.Wire.TargetMemberID != "" &&
+			event.Wire.TargetSessionID != "" &&
+			event.Wire.TargetSessionID == current.id &&
+			(frame.Type == "rtc.description" || frame.Type == "rtc.candidate")
+		if !prebindRTCTarget {
+			if currentBinding == nil || currentBinding.RoomID != event.Wire.RoomID || event.Wire.ExcludedMemberID == currentBinding.MemberID || (event.Wire.TargetMemberID != "" && event.Wire.TargetMemberID != currentBinding.MemberID) || (event.Wire.TargetSessionID != "" && event.Wire.TargetSessionID != currentBinding.SessionID) {
+				continue
+			}
+		}
+		_ = current.send(frame)
+		if currentBinding == nil {
 			continue
 		}
-		frame := event.Wire.Event
-		frame.RoomID = event.Wire.RoomID
-		_ = current.send(frame)
 		if version := snapshotVersion(frame.Payload); version > currentBinding.SnapshotVersion {
 			currentBinding.SnapshotVersion = version
 			current.setBinding(currentBinding)
