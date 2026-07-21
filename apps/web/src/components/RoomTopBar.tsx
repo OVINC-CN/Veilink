@@ -128,7 +128,7 @@ export function RoomTopBar({
         <nav className="top-actions" aria-label={zh ? '房间操作' : 'Room controls'}>
           <div className="popover-anchor members-popover-anchor">
             <button className="top-action members-trigger" type="button" aria-label={zh ? `成员，${room.members.length} 人在线` : `Members, ${room.members.length} online`} aria-expanded={panel === 'details'} onClick={() => toggle('details')}>
-              <Users /><span><b>{room.members.length}</b><span className="members-online-label"> {zh ? '人在线' : 'online'}</span></span><CaretDown />
+              <Users /><b>{room.members.length}</b><CaretDown />
             </button>
             {panel === 'details' ? (
               <section className="popover topbar-dropdown details-popover" aria-label={zh ? '人员列表' : 'Members'}>

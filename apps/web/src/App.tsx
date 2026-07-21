@@ -1226,6 +1226,7 @@ export default function App() {
   useEffect(() => {
     if (stage !== 'recovering' || recoveryAttemptedRef.current) return
     recoveryAttemptedRef.current = true
+    setJoinAttempt(createJoinAttempt())
     let cancelled = false
     let signal: SignalClient | undefined
     let identity: SessionIdentity | undefined
@@ -1237,19 +1238,24 @@ export default function App() {
       if (!roomId) throw new Error('恢复路径无效')
       const bundle = await loadRecovery(roomId)
       if (!bundle) throw new Error('恢复信息已失效')
-      const publicConfig = await loadPublicConfig()
-      identity = restoreIdentity(bundle)
-      keys = restoreKeys(bundle)
+      const publicConfig = await runJoinStep('config', loadPublicConfig)
+      await runJoinStep('keys', () => {
+        identity = restoreIdentity(bundle)
+        keys = restoreKeys(bundle)
+      })
       signal = new SignalClient(roomId, publicConfig.disconnectGraceMs)
-      const confirmation = await signal.resumeRoom({
+      await runJoinStep('signal', () => signal!.connect())
+      startJoinStep('challenge')
+      completeJoinStep('challenge', true)
+      const confirmation = await runJoinStep('admission', () => signal!.resumeRoom({
         memberId: MemberIdSchema.parse(bundle.memberId),
         resumeToken: bundle.resumeToken,
         identityPublicKey: IdentityPublicKeySchema.parse(bundle.identity.publicKey),
-      })
+      }))
       resumed = true
       if (cancelled) throw new Error('恢复已取消')
       setLinkSecret(bundle.linkSecret)
-      await setupRuntime(confirmation, signal, identity, keys, bundle.linkSecret, bundle.pin, restoreReplayCounters(bundle))
+      await setupRuntime(confirmation, signal, identity!, keys!, bundle.linkSecret, bundle.pin, restoreReplayCounters(bundle), true)
       signal = undefined
       identity = undefined
       keys = undefined
@@ -1258,7 +1264,8 @@ export default function App() {
       if (!await persistCurrentRecovery()) throw new Error('无法更新安全刷新检查点')
       window.history.replaceState(window.history.state, '', `/room/${roomId}`)
       setError(undefined)
-      setStage('room')
+      setJoinAttempt((current) => current ? { ...current, finishedAt: Date.now() } : current)
+      setStage('join')
     })().catch((caught: unknown) => {
       if (cancelled) return
       if (runtimeRef.current) stopRuntime(true)
@@ -1706,7 +1713,7 @@ export default function App() {
   return (
     <EntryShell preferences={preferences} onPreferences={setPreferences}>
       {stage === 'create' ? <CreateRoomView preferences={preferences} busy={busy} avatarSeed={entryIdentityPublicKey} avatarBusy={entryIdentityBusy} creationPasswordRequired={roomCreationPasswordRequired} error={error} onRegenerateAvatar={regenerateEntryIdentity} onCreate={createRoom} /> : null}
-      {stage === 'join' ? <JoinRoomView preferences={preferences} hasLinkSecret={Boolean(linkSecret)} busy={busy} avatarSeed={entryIdentityPublicKey ?? (joinAttempt?.finishedAt !== undefined && !joinAttempt.failure ? room?.members.find((member) => member.id === room.memberId)?.identityPublicKey : undefined)} avatarBusy={entryIdentityBusy} error={error} joinAttempt={joinAttempt} onRegenerateAvatar={regenerateEntryIdentity} onJoin={joinRoom} onEnter={() => setStage('room')} /> : null}
+      {stage === 'join' ? <JoinRoomView preferences={preferences} hasLinkSecret={Boolean(linkSecret)} busy={busy} avatarSeed={entryIdentityPublicKey ?? (joinAttempt?.finishedAt !== undefined && !joinAttempt.failure ? room?.members.find((member) => member.id === room.memberId)?.identityPublicKey : undefined)} avatarBusy={entryIdentityBusy} error={error} joinAttempt={joinAttempt} initialNickname={room?.members.find((member) => member.id === room.memberId)?.nickname} initialPin={room?.pin} onRegenerateAvatar={regenerateEntryIdentity} onJoin={joinRoom} onEnter={() => setStage('room')} /> : null}
       {stage === 'created' && createdDetails ? <RoomCreatedView pin={createdDetails.pin} invitation={createdDetails.invitation} preferences={preferences} onContinue={() => { setCreatedDetails(undefined); setStage('room') }} /> : null}
     </EntryShell>
   )

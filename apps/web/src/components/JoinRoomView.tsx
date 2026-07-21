@@ -14,6 +14,8 @@ interface JoinRoomViewProps {
   avatarBusy: boolean
   error?: string
   joinAttempt?: JoinAttempt
+  initialNickname?: string
+  initialPin?: string
   onRegenerateAvatar: () => Promise<void> | void
   onJoin: (nickname: string, pin: string) => Promise<void> | void
   onEnter: () => void
@@ -242,9 +244,9 @@ function JoinProgress({ attempt, locale }: { attempt: JoinAttempt; locale: 'zh-C
   )
 }
 
-export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, avatarBusy, error, joinAttempt, onRegenerateAvatar, onJoin, onEnter }: JoinRoomViewProps) {
-  const [nickname, setNickname] = useState(preferences.rememberNickname ? preferences.nickname ?? '' : '')
-  const [digits, setDigits] = useState<string[]>(() => Array.from({ length: 6 }, () => ''))
+export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, avatarBusy, error, joinAttempt, initialNickname, initialPin, onRegenerateAvatar, onJoin, onEnter }: JoinRoomViewProps) {
+  const [nickname, setNickname] = useState(initialNickname ?? (preferences.rememberNickname ? preferences.nickname ?? '' : ''))
+  const [digits, setDigits] = useState<string[]>(() => Array.from({ length: 6 }, (_, index) => initialPin?.[index] ?? ''))
   const inputs = useRef<Array<HTMLInputElement | null>>([])
   const pin = digits.join('')
   const ready = joinAttempt?.finishedAt !== undefined && !joinAttempt.failure

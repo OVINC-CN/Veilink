@@ -1394,7 +1394,6 @@ button.message-reply-reference:hover { border-color: var(--accent); background: 
   .top-action { min-height: 40px; padding: 0 8px; }
   .top-action > span { display: inline; }
   .members-trigger { gap: 5px; }
-  .members-online-label { display: none; }
   .top-icon, .top-actions .icon-button { width: 38px; height: 40px; }
   .popover { position: fixed; top: 65px; right: 8px; left: 8px; width: auto; max-height: calc(100dvh - 73px); overflow-y: auto; }
   .topbar-dropdown, .more-popover { right: 8px; left: 8px; width: auto; }
