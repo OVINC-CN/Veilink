@@ -1,4 +1,4 @@
-import { PROTOCOL_VERSION } from '@veilink/protocol'
+import { PROTOCOL_VERSION } from '../protocol'
 import { ArrowRight, ArrowsClockwise, CaretDown, Check, CheckCircle, Circle, Copy, Key, ShieldCheck, SpinnerGap, WarningCircle, XCircle } from '@phosphor-icons/react'
 import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent } from 'react'
 import { t } from '../i18n'

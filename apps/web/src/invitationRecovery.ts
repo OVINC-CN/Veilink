@@ -1,4 +1,4 @@
-import { LinkSecretSchema, MAX_ROOM_TTL_MS, RoomIdSchema } from '@veilink/protocol'
+import { LinkSecretSchema, MAX_ROOM_TTL_MS, RoomIdSchema } from './protocol'
 import { base64UrlToBytes, bytesToBase64Url, randomBytes } from './lib/encoding'
 
 const STORAGE_KEY = 'veilink.invitation.v1'

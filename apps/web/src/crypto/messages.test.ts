@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import type { IdentityPublicKey } from '@veilink/protocol'
+import type { IdentityPublicKey } from '../protocol'
 import sodium from 'libsodium-wrappers-sumo'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { bytesToBase64Url } from '../lib/encoding'

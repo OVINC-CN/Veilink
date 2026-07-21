@@ -10,7 +10,7 @@ import {
   ResumeTokenSchema,
   RoomIdSchema,
   SessionIdSchema,
-} from '@veilink/protocol'
+} from './protocol'
 import type { ChatMessage } from './models'
 import type { DerivedKeys, SessionIdentity } from './crypto/types'
 import { base64UrlToBytes, bytesToBase64Url, randomBytes } from './lib/encoding'

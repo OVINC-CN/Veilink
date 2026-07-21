@@ -1,5 +1,5 @@
 import sodium from 'libsodium-wrappers-sumo'
-import { PROTOCOL_VERSION, type EncryptedChatFrame, type IdentityPublicKey } from '@veilink/protocol'
+import { PROTOCOL_VERSION, type EncryptedChatFrame, type IdentityPublicKey } from '../protocol'
 import { base64UrlToBytes, bytesToBase64Url, concatBytes, randomId } from '../lib/encoding'
 import type { SessionIdentity } from './types'
 

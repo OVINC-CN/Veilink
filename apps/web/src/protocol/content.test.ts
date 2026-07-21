@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -6,7 +8,7 @@ import {
   ChatPayloadSchema,
   base64UrlEncode,
   validateRichTextDocument,
-} from "../src/index.js";
+} from "./index.js";
 
 const attachmentId = AttachmentIdSchema.parse(base64UrlEncode(new Uint8Array(16).fill(7)));
 

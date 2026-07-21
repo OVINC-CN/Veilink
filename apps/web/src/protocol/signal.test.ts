@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -11,7 +13,7 @@ import {
   RoomSnapshotSchema,
   ServerSignalEnvelopeSchema,
   base64UrlEncode,
-} from "../src/index.js";
+} from "./index.js";
 
 function fixedToken(bytes: number, fill: number): string {
   return base64UrlEncode(new Uint8Array(bytes).fill(fill));

@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -9,7 +11,7 @@ import {
   normalizeNickname,
   parseStoredPreferences,
   serializePreferences,
-} from "../src/index.js";
+} from "./index.js";
 
 describe("display names", () => {
   it("normalizes nicknames to NFC and trims spacing", () => {

@@ -54,9 +54,9 @@ Browser A  <-- encrypted WebRTC -->  Cloudflare TURN  <-- encrypted WebRTC -->  
                                        Redis
 ```
 
-- `apps/web`: React and Vite client
+- `apps/web`: React and Vite client, including browser-side schemas and
+  cryptographic protocol helpers
 - `apps/server`: Go HTTP/WebSocket signalling service
-- `packages/protocol`: browser-side schemas and cryptographic protocol helpers
 
 The backend implementation and server process use Go and require no JavaScript
 or Node.js runtime. Node.js is only a frontend build tool; Go serves the
@@ -72,10 +72,14 @@ Requirements:
 - Redis 7.4 or newer
 
 ```bash
-pnpm install --frozen-lockfile
-pnpm lint
-pnpm typecheck
-pnpm build
+pnpm --dir apps/web install --frozen-lockfile
+pnpm --dir apps/web lint
+pnpm --dir apps/web typecheck
+pnpm --dir apps/web test
+pnpm --dir apps/web build
+
+GOTOOLCHAIN=local go -C apps/server vet ./...
+GOTOOLCHAIN=local go -C apps/server build ./...
 ```
 
 The resulting server binary is built from `apps/server/cmd/veilink`. The client

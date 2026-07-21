@@ -1,5 +1,5 @@
 import { ArrowBendUpLeft, ArrowDown, Bell, CaretRight, ChatCircleDots, SpinnerGap, X } from '@phosphor-icons/react'
-import type { ReplyReference } from '@veilink/protocol'
+import type { ReplyReference } from '../protocol'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { t } from '../i18n'

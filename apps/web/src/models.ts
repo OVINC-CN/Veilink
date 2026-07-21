@@ -1,4 +1,4 @@
-import type { ReplyReference } from '@veilink/protocol'
+import type { ReplyReference } from './protocol'
 import type { DerivedKeys } from './crypto/types'
 
 export interface Member {

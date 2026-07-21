@@ -9,13 +9,13 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ['apps/web/public/**/*.js'],
+    files: ['public/**/*.js'],
     languageOptions: {
       globals: globals.browser,
     },
   },
   {
-    files: ['apps/web/**/*.{ts,tsx}'],
+    files: ['src/**/*.{ts,tsx}'],
     languageOptions: {
       globals: globals.browser,
     },
@@ -26,12 +26,6 @@ export default tseslint.config(
     rules: {
       ...reactHooks.configs.recommended.rules,
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
-    },
-  },
-  {
-    files: ['packages/**/*.ts'],
-    languageOptions: {
-      globals: globals.node,
     },
   },
 )

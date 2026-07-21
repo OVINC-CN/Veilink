@@ -24,7 +24,7 @@ import {
   type RoomSnapshot,
   type ServerSignalEnvelope,
   type TurnCredentials,
-} from '@veilink/protocol'
+} from './protocol'
 import { CreateRoomView } from './components/CreateRoomView'
 import { EntryShell } from './components/EntryShell'
 import { JoinRoomView } from './components/JoinRoomView'

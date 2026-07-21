@@ -7,36 +7,6 @@ settings:
 importers:
 
   .:
-    devDependencies:
-      '@eslint/js':
-        specifier: ^9.32.0
-        version: 9.39.5
-      '@types/node':
-        specifier: ^22.16.5
-        version: 22.20.1
-      eslint:
-        specifier: ^9.32.0
-        version: 9.39.5
-      eslint-plugin-react-hooks:
-        specifier: ^5.2.0
-        version: 5.2.0(eslint@9.39.5)
-      eslint-plugin-react-refresh:
-        specifier: ^0.4.20
-        version: 0.4.26(eslint@9.39.5)
-      globals:
-        specifier: ^16.3.0
-        version: 16.5.0
-      typescript:
-        specifier: ^5.8.3
-        version: 5.9.3
-      typescript-eslint:
-        specifier: ^8.38.0
-        version: 8.64.0(eslint@9.39.5)(typescript@5.9.3)
-      vitest:
-        specifier: ^3.2.4
-        version: 3.2.7(@types/node@22.20.1)(jsdom@26.1.0)
-
-  apps/web:
     dependencies:
       '@phosphor-icons/react':
         specifier: ^2.1.10
@@ -56,9 +26,6 @@ importers:
       '@tiptap/suggestion':
         specifier: ^2.26.1
         version: 2.27.2(@tiptap/core@2.27.2(@tiptap/pm@2.27.2))(@tiptap/pm@2.27.2)
-      '@veilink/protocol':
-        specifier: workspace:*
-        version: link:../../packages/protocol
       file-type:
         specifier: ^21.0.0
         version: 21.3.4
@@ -77,7 +44,13 @@ importers:
       react-dom:
         specifier: ^19.1.0
         version: 19.2.7(react@19.2.7)
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
     devDependencies:
+      '@eslint/js':
+        specifier: ^9.32.0
+        version: 9.39.5
       '@testing-library/jest-dom':
         specifier: ^6.6.3
         version: 6.9.1
@@ -87,6 +60,9 @@ importers:
       '@types/libsodium-wrappers-sumo':
         specifier: ^0.7.8
         version: 0.7.8
+      '@types/node':
+        specifier: ^22.16.5
+        version: 22.20.1
       '@types/react':
         specifier: ^19.1.8
         version: 19.2.17
@@ -96,18 +72,33 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^4.7.0
         version: 4.7.0(vite@7.3.6(@types/node@22.20.1))
+      eslint:
+        specifier: ^9.32.0
+        version: 9.39.5
+      eslint-plugin-react-hooks:
+        specifier: ^5.2.0
+        version: 5.2.0(eslint@9.39.5)
+      eslint-plugin-react-refresh:
+        specifier: ^0.4.20
+        version: 0.4.26(eslint@9.39.5)
+      globals:
+        specifier: ^16.3.0
+        version: 16.5.0
       jsdom:
         specifier: ^26.1.0
         version: 26.1.0
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+      typescript-eslint:
+        specifier: ^8.38.0
+        version: 8.64.0(eslint@9.39.5)(typescript@5.9.3)
       vite:
         specifier: ^7.0.6
         version: 7.3.6(@types/node@22.20.1)
-
-  packages/protocol:
-    dependencies:
-      zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@22.20.1)(jsdom@26.1.0)
 
 packages:
 
@@ -1562,8 +1553,8 @@ packages:
     resolution: {integrity: sha512-RvwwcruNjI1ncT5xRakeyS9Lf8lcItv34KD+aif+VH9kduAyfYBipGh12274xtenIPZ119/R9BdTBa8gAwSh0A==}
     engines: {node: '>=12'}
 
-  postcss@8.5.19:
-    resolution: {integrity: sha512-Mz8SaolMd8nB+G13WkORcxQKHZ/NE4xXevtkJHVuG+guo9/wYKlIMTKAqGdEmYOXR2ijPjTYNHssizdaVSUNdQ==}
+  postcss@8.5.20:
+    resolution: {integrity: sha512-lW616l85ucIQL+FocMmL7pQFPqBmwejrCMg+iPxyImlrANNJG9NHq/RkyCZopDhd8C3LA03PHRJDjkbGu8vvug==}
     engines: {node: ^10 || ^12 || >=14}
 
   prelude-ls@1.2.1:
@@ -3347,7 +3338,7 @@ snapshots:
 
   picomatch@4.0.5: {}
 
-  postcss@8.5.19:
+  postcss@8.5.20:
     dependencies:
       nanoid: 3.3.16
       picocolors: 1.1.1
@@ -3673,7 +3664,7 @@ snapshots:
       esbuild: 0.28.1
       fdir: 6.5.0(picomatch@4.0.5)
       picomatch: 4.0.5
-      postcss: 8.5.19
+      postcss: 8.5.20
       rollup: 4.62.2
       tinyglobby: 0.2.17
     optionalDependencies:

@@ -16,7 +16,7 @@ import {
   type SignalErrorCode,
   type ServerSignalType,
   type TurnCredentials,
-} from '@veilink/protocol'
+} from '../protocol'
 
 interface PendingRequest {
   expected: Set<ServerSignalType>

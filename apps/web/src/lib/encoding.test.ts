@@ -1,4 +1,4 @@
-import { generatePin } from '@veilink/protocol'
+import { generatePin } from '../protocol'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   base64UrlToBytes,

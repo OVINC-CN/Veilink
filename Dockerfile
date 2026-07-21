@@ -4,24 +4,18 @@ FROM --platform=$BUILDPLATFORM node:22.20.0-bookworm-slim AS web-build
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
-WORKDIR /app
+WORKDIR /app/apps/web
 
 RUN corepack enable && corepack prepare pnpm@11.0.9 --activate
 
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY apps/web/package.json apps/web/package.json
-COPY packages/protocol/package.json packages/protocol/package.json
+COPY apps/web/package.json apps/web/pnpm-lock.yaml apps/web/pnpm-workspace.yaml ./
 
 RUN --mount=type=cache,id=veilink-pnpm,target=/pnpm/store \
     pnpm install --frozen-lockfile
 
-COPY tsconfig.base.json eslint.config.js ./
-COPY assets/veilink-logo.png assets/veilink-mark.png ./assets/
-COPY apps/web ./apps/web
-COPY packages/protocol ./packages/protocol
+COPY apps/web ./
 
-RUN pnpm --filter @veilink/protocol build \
-    && pnpm --filter @veilink/web build
+RUN pnpm build
 
 FROM --platform=$BUILDPLATFORM golang:1.26.5-bookworm AS go-build
 

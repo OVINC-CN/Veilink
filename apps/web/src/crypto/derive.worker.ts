@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 import sodium from 'libsodium-wrappers-sumo'
-import { RoomIdSchema, encodeHkdfInfo } from '@veilink/protocol'
+import { RoomIdSchema, encodeHkdfInfo } from '../protocol'
 import { base64UrlToBytes, concatBytes } from '../lib/encoding'
 
 interface DeriveRequest {

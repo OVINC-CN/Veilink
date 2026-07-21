@@ -1,4 +1,4 @@
-import { isSafeHttpUrl, type ReplyReference } from '@veilink/protocol'
+import { isSafeHttpUrl, type ReplyReference } from '../protocol'
 import { EditorContent, ReactRenderer, useEditor } from '@tiptap/react'
 import Link from '@tiptap/extension-link'
 import Mention, { type MentionNodeAttrs } from '@tiptap/extension-mention'

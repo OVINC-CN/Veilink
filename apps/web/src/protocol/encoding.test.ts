@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -11,7 +13,7 @@ import {
   generatePin,
   generateRoomId,
   timingSafeEqual,
-} from "../src/index.js";
+} from "./index.js";
 
 describe("base64url helpers", () => {
   it("round-trips bytes canonically without padding", () => {

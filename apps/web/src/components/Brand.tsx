@@ -1,4 +1,4 @@
-import logoUrl from '../../../../assets/veilink-logo.png'
+import logoUrl from '../assets/brand/veilink-logo.png'
 
 export function Brand() {
   return (

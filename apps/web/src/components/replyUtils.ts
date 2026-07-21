@@ -4,7 +4,7 @@ import {
   ReplyReferenceSchema,
   type ReplyPreviewKind,
   type ReplyReference,
-} from '@veilink/protocol'
+} from '../protocol'
 import type { ChatMessage, RichNode, RichTextDocument } from '../models'
 import type { Locale } from '../preferences'
 import { t } from '../i18n'
