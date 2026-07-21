@@ -90,12 +90,9 @@ describe('room workspace layout', () => {
     )
 
     expect(screen.getByRole('main')).toHaveClass('chat-main')
-    expect(screen.getByRole('navigation', { name: '房间视图' })).toBeInTheDocument()
     expect(screen.getByRole('navigation', { name: '房间操作' })).toBeInTheDocument()
-    expect(screen.getByRole('complementary', { name: 'Veilink 导航' })).toBeInTheDocument()
-    const detailsPanel = screen.getByRole('complementary', { name: '连接详情' })
-    expect(within(detailsPanel).getByText('P2P 直连')).toBeInTheDocument()
-    expect(within(detailsPanel).getByText('无中继')).toBeInTheDocument()
+    expect(screen.queryByRole('navigation', { name: '房间视图' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('complementary', { name: 'Veilink 导航' })).not.toBeInTheDocument()
     expect(screen.queryByText('TURN 中继')).not.toBeInTheDocument()
 
     const membersButton = screen.getByRole('button', { name: /成员与连接，2 人在线/u })
@@ -103,7 +100,9 @@ describe('room workspace layout', () => {
     fireEvent.click(membersButton)
     expect(membersButton).toHaveAttribute('aria-expanded', 'true')
 
-    expect(detailsPanel).toHaveClass('is-open')
+    const detailsPanel = screen.getByRole('region', { name: '连接详情' })
+    expect(within(detailsPanel).getByText('P2P 直连')).toBeInTheDocument()
+    expect(within(detailsPanel).getByText('无中继')).toBeInTheDocument()
     expect(within(detailsPanel).getByText('Mira（你）')).toBeInTheDocument()
     expect(within(detailsPanel).getByText('River')).toBeInTheDocument()
     expect(within(detailsPanel).queryByText(/公网 IP/u)).not.toBeInTheDocument()

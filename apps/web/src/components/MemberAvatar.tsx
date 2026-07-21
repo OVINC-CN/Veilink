@@ -1,6 +1,5 @@
-import avatarCyan from '../assets/avatars/avatar-cyan.png'
-import avatarIndigo from '../assets/avatars/avatar-indigo.png'
-import avatarSlate from '../assets/avatars/avatar-slate.png'
+import { toSvg } from 'jdenticon'
+import { useMemo } from 'react'
 
 interface MemberAvatarProps {
   seed: string
@@ -8,19 +7,13 @@ interface MemberAvatarProps {
   className?: string
 }
 
-const avatars = [avatarCyan, avatarIndigo, avatarSlate] as const
-
-function seedHash(seed: string): number {
-  let hash = 0x811c9dc5
-  for (const character of seed) {
-    hash ^= character.codePointAt(0) ?? 0
-    hash = Math.imul(hash, 0x01000193)
-  }
-  return hash >>> 0
-}
-
 export function MemberAvatar({ seed, label, className = '' }: MemberAvatarProps) {
-  const source = avatars[seedHash(seed) % avatars.length] ?? avatarCyan
+  const source = useMemo(() => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(toSvg(seed, 96, {
+    backColor: '#f4f6f8ff',
+    saturation: { color: 0.62, grayscale: 0.12 },
+    lightness: { color: [0.34, 0.68], grayscale: [0.30, 0.74] },
+    padding: 0.12,
+  }))}`, [seed])
   return (
     <img
       className={`member-avatar ${className}`.trim()}

@@ -1,4 +1,4 @@
-import { ArrowBendUpLeft, ArrowDown, Bell, CaretRight, LockKey, ShieldCheck, SpinnerGap, X } from '@phosphor-icons/react'
+import { ArrowBendUpLeft, ArrowDown, Bell, CaretRight, ChatCircleDots, SpinnerGap, X } from '@phosphor-icons/react'
 import type { ReplyReference } from '@veilink/protocol'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
@@ -7,14 +7,12 @@ import type { ActiveRoom, ChatMessage, RichTextDocument } from '../models'
 import type { Preferences } from '../preferences'
 import { mentionNotificationAvailability, requestMentionNotificationPermission } from '../mentionNotifications'
 import { AttachmentPreview } from './AttachmentPreview'
-import { AppRail } from './AppRail'
 import { ChatComposer } from './ChatComposer'
 import { LocalLinkCard } from './LocalLinkCard'
 import { MemberAvatar } from './MemberAvatar'
 import { RichText } from './RichText'
 import { extractLinks } from './richTextUtils'
 import { RoomTopBar } from './RoomTopBar'
-import { RoomSidePanel } from './RoomSidePanel'
 import { formatReplyExcerpt, replyReferenceForMessage, replyReferenceKey } from './replyUtils'
 
 interface RoomShellProps {
@@ -77,7 +75,6 @@ export function RoomShell(props: RoomShellProps) {
   const [pressingMessageId, setPressingMessageId] = useState<string>()
   const [messageMenu, setMessageMenu] = useState<MessageMenuState>()
   const [requestingNotifications, setRequestingNotifications] = useState(false)
-  const [detailsOpen, setDetailsOpen] = useState(false)
   const lastMessage = messages.at(-1)
   const lastMessageId = lastMessage?.id
   const lastMessageSenderId = lastMessage?.senderId
@@ -233,28 +230,15 @@ export function RoomShell(props: RoomShellProps) {
 
   return (
     <div className={`app-shell density-${preferences.density}`}>
-      <AppRail
-        locale={preferences.locale}
-        detailsOpen={detailsOpen}
-        onDetailsToggle={() => setDetailsOpen((current) => !current)}
-      />
       <RoomTopBar
         room={room}
         preferences={preferences}
         connectionState={props.connectionState}
-        detailsOpen={detailsOpen}
-        onDetailsToggle={() => setDetailsOpen((current) => !current)}
         onPreferences={props.onPreferences}
         onLeave={props.onLeave}
+        onDestroy={props.onDestroy}
       />
       <main className="chat-main">
-        <div className="room-intro">
-          <span className="room-intro-icon"><LockKey weight="duotone" /></span>
-          <span>
-            <strong>{preferences.locale === 'zh-CN' ? '仅限本次会话' : 'For this session only'}</strong>
-            <small>{t(preferences.locale, 'encryptedNotice')}</small>
-          </span>
-        </div>
         {showNotificationPrompt ? (
           <aside className="notification-prompt" aria-labelledby="notification-prompt-title">
             <Bell weight="duotone" aria-hidden="true" />
@@ -269,7 +253,7 @@ export function RoomShell(props: RoomShellProps) {
         <section ref={messageList} className="message-list" aria-live="polite" aria-label={preferences.locale === 'zh-CN' ? '聊天消息' : 'Chat messages'} onScroll={trackScrollPosition}>
           {messages.length === 0 ? (
             <div className="empty-state">
-              <span className="empty-state-icon"><ShieldCheck weight="duotone" /></span>
+              <span className="empty-state-icon"><ChatCircleDots weight="duotone" /></span>
               <strong>{preferences.locale === 'zh-CN' ? '从第一条消息开始' : 'Start with the first message'}</strong>
               <span>{t(preferences.locale, 'noMessages')}</span>
             </div>
@@ -373,17 +357,8 @@ export function RoomShell(props: RoomShellProps) {
             onSend={props.onSend}
             onFiles={props.onFiles}
           />
-          <p className="composer-security-footnote"><ShieldCheck weight="duotone" />{preferences.locale === 'zh-CN' ? '端到端加密 · P2P 直连（无中继）· 服务器不存储消息历史' : 'End-to-end encrypted · P2P direct (no relay) · No server message history'}</p>
         </div>
       </main>
-      <RoomSidePanel
-        room={room}
-        preferences={preferences}
-        connectionState={props.connectionState}
-        open={detailsOpen}
-        onClose={() => setDetailsOpen(false)}
-        onDestroy={props.onDestroy}
-      />
       {messageMenu ? createPortal(
         <div
           ref={messageMenuNode}

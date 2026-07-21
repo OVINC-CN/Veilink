@@ -18,6 +18,7 @@
     "@tiptap/suggestion": "^2.26.1",
     "@veilink/protocol": "workspace:*",
     "file-type": "^21.0.0",
+    "jdenticon": "^3.3.0",
     "libsodium-wrappers-sumo": "0.7.15",
     "pdfjs-dist": "^5.4.54",
     "react": "^19.1.0",
