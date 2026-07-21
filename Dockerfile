@@ -16,6 +16,7 @@ RUN --mount=type=cache,id=veilink-pnpm,target=/pnpm/store \
     pnpm install --frozen-lockfile
 
 COPY tsconfig.base.json eslint.config.js ./
+COPY assets/veilink-logo.png assets/veilink-mark.png ./assets/
 COPY apps/web ./apps/web
 COPY packages/protocol ./packages/protocol
 

@@ -295,7 +295,7 @@ export function RoomShell(props: RoomShellProps) {
                 onPointerCancel={finishLongPress}
                 onLostPointerCapture={finishLongPress}
                 onContextMenu={(event) => {
-                  if (window.matchMedia('(pointer: coarse)').matches && isMessageBlankTarget(event.currentTarget, event.target)) event.preventDefault()
+                  if (typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches && isMessageBlankTarget(event.currentTarget, event.target)) event.preventDefault()
                 }}
               >
                 <MemberAvatar seed={message.senderIdentityPublicKey} className="message-avatar" />

@@ -14,6 +14,14 @@ import type { ActiveRoom } from '../models'
 import type { Preferences } from '../preferences'
 import { MemberAvatar } from './MemberAvatar'
 
+const drawerMediaQuery = '(max-width: 1180px)'
+
+function matchesMedia(query: string): boolean {
+  return typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia(query).matches
+}
+
 function formatRemaining(expiresAt: number): string {
   const seconds = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000))
   const hours = Math.floor(seconds / 3600)
@@ -40,7 +48,7 @@ export function RoomSidePanel({
   const [remaining, setRemaining] = useState(() => formatRemaining(room.expiresAt))
   const [destroyOpen, setDestroyOpen] = useState(false)
   const [confirmation, setConfirmation] = useState('')
-  const [drawerMode, setDrawerMode] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 1180px)').matches)
+  const [drawerMode, setDrawerMode] = useState(() => matchesMedia(drawerMediaQuery))
   const dialog = useRef<HTMLElement>(null)
   const zh = preferences.locale === 'zh-CN'
   const isOwner = room.ownerId === room.memberId
@@ -53,7 +61,8 @@ export function RoomSidePanel({
   }, [room.expiresAt])
 
   useEffect(() => {
-    const media = window.matchMedia('(max-width: 1180px)')
+    if (typeof window.matchMedia !== 'function') return
+    const media = window.matchMedia(drawerMediaQuery)
     const update = (): void => setDrawerMode(media.matches)
     update()
     media.addEventListener('change', update)
