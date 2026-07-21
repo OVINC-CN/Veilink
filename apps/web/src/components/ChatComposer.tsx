@@ -97,7 +97,6 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
   const toolbar = useRef<HTMLDivElement>(null)
   const emojiAnchor = useRef<HTMLDivElement>(null)
   const emojiMenu = useRef<HTMLDivElement>(null)
-  const fileInput = useRef<HTMLInputElement>(null)
   const savedSelection = useRef<{ from: number; to: number } | undefined>(undefined)
   const membersRef = useRef(members)
   const localeRef = useRef<Locale>(preferences.locale)
@@ -441,6 +440,7 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
   }
 
   const commandDisabled = (canRun: boolean): boolean => disabled || !editor || !canRun
+  const attachmentLabel = preferences.locale === 'zh-CN' ? '添加附件' : 'Add attachment'
 
   return (
     <div className={`composer-shell${disabled ? ' is-disabled' : ''}`} ref={root} aria-busy={disabled}>
@@ -475,21 +475,20 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
           <div ref={emojiAnchor} className="toolbar-popover-anchor">
             <ToolbarButton label="Emoji" disabled={disabled || !editor} expanded={emojiOpen} onActivate={toggleEmoji}><Smiley /></ToolbarButton>
           </div>
-          <ToolbarButton label={preferences.locale === 'zh-CN' ? '添加附件' : 'Add attachment'} disabled={disabled} onActivate={() => fileInput.current?.click()}><Paperclip /></ToolbarButton>
-          <input
-            ref={fileInput}
-            className="visually-hidden"
-            type="file"
-            multiple
-            disabled={disabled}
-            tabIndex={-1}
-            aria-hidden="true"
-            onChange={(event) => {
-              const files = [...(event.target.files ?? [])]
-              event.target.value = ''
-              if (files.length > 0) void submitFiles(files)
-            }}
-          />
+          <label className={`attachment-picker${disabled ? ' is-disabled' : ''}`} title={attachmentLabel}>
+            <Paperclip aria-hidden="true" />
+            <input
+              type="file"
+              multiple
+              disabled={disabled}
+              aria-label={attachmentLabel}
+              onChange={(event) => {
+                const files = [...(event.currentTarget.files ?? [])]
+                event.currentTarget.value = ''
+                if (files.length > 0) void submitFiles(files)
+              }}
+            />
+          </label>
         </div>
       </div>
       {linkOpen ? (

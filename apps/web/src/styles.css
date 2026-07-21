@@ -1272,8 +1272,34 @@ button.message-reply-reference:hover { border-color: var(--accent); background: 
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
 }
-.composer-toolbar button { width: 30px; height: 30px; border-radius: 7px; }
+.composer-toolbar button, .composer-toolbar .attachment-picker { width: 30px; height: 30px; border-radius: 7px; }
 .composer-toolbar svg { width: 17px; height: 17px; }
+.composer-toolbar .attachment-picker {
+  position: relative;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  overflow: hidden;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: transform 90ms ease-out, background-color 140ms ease-out, color 140ms ease-out;
+}
+.composer-toolbar .attachment-picker:hover:not(.is-disabled), .composer-toolbar .attachment-picker:focus-within { background: var(--surface-hover); color: var(--text); }
+.composer-toolbar .attachment-picker:active:not(.is-disabled) { transform: scale(.88); }
+.composer-toolbar .attachment-picker.is-disabled { opacity: .34; cursor: not-allowed; }
+.composer-toolbar .attachment-picker input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.composer-toolbar .attachment-picker input:focus-visible { outline: none; }
+.composer-toolbar .attachment-picker input:disabled { cursor: not-allowed; }
 .composer-body {
   order: 2;
   display: grid;
@@ -1322,7 +1348,7 @@ button.message-reply-reference:hover { border-color: var(--accent); background: 
   .message-actions button { border: 0; background: transparent; box-shadow: none; }
   .notification-prompt { grid-template-columns: auto minmax(0, 1fr) auto; }
   .composer-toolbar { padding: 5px 7px; }
-  .composer-toolbar button { width: 38px; height: 38px; }
+  .composer-toolbar button, .composer-toolbar .attachment-picker { width: 38px; height: 38px; }
   .toolbar-divider { height: 22px; }
   .composer-body { min-height: 60px; padding-left: 12px; }
   .composer-editor { font-size: 16px; }

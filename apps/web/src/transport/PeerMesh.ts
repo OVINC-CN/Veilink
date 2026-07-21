@@ -12,6 +12,13 @@ interface PeerRecord {
   ready: boolean
 }
 
+type PeerConnectionConstructor = typeof RTCPeerConnection
+
+type LegacyPeerConnectionGlobal = typeof globalThis & {
+  webkitRTCPeerConnection?: PeerConnectionConstructor
+  mozRTCPeerConnection?: PeerConnectionConstructor
+}
+
 export interface PeerMeshOptions {
   localMemberId: string
   iceServers: RTCIceServer[]
@@ -22,6 +29,17 @@ export interface PeerMeshOptions {
 }
 
 const MAX_PENDING_CANDIDATES = 64
+
+function resolvePeerConnectionConstructor(): PeerConnectionConstructor {
+  const browserGlobal = globalThis as LegacyPeerConnectionGlobal
+  const constructor = browserGlobal.RTCPeerConnection
+    ?? browserGlobal.webkitRTCPeerConnection
+    ?? browserGlobal.mozRTCPeerConnection
+  if (!constructor) {
+    throw new Error('当前浏览器未提供 WebRTC。请启用 WebRTC 功能，或更新浏览器/系统 WebView 后重试。')
+  }
+  return constructor
+}
 
 function localMemberOffers(localMemberId: string, remoteMemberId: string): boolean {
   return localMemberId < remoteMemberId
@@ -95,12 +113,14 @@ async function selectedPairIsExplicitlyNonRelay(connection: RTCPeerConnection): 
 
 export class PeerMesh {
   private readonly peers = new Map<string, PeerRecord>()
+  private readonly peerConnectionConstructor: PeerConnectionConstructor
   private knownMembers: Member[] = []
   private iceServers: RTCIceServer[]
 
   constructor(private readonly options: PeerMeshOptions) {
     this.iceServers = turnOnlyServers(options.iceServers)
     if (this.iceServers.length === 0) throw new Error('Cloudflare TURN credentials are required')
+    this.peerConnectionConstructor = resolvePeerConnectionConstructor()
   }
 
   syncMembers(members: Member[]): void {
@@ -189,7 +209,7 @@ export class PeerMesh {
   }
 
   private createPeer(memberId: string): PeerRecord {
-    const connection = new RTCPeerConnection(rtcConfiguration(this.iceServers))
+    const connection = new this.peerConnectionConstructor(rtcConfiguration(this.iceServers))
     const peer: PeerRecord = { connection, pendingCandidates: [], ready: false }
     this.peers.set(memberId, peer)
     connection.addEventListener('icecandidate', (event) => {
