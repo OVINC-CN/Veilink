@@ -1,4 +1,4 @@
-name: Container images
+name: Container image
 
 on:
   push:
@@ -19,19 +19,9 @@ concurrency:
 
 jobs:
   build:
-    name: Build ${{ matrix.name }}
+    name: Build app
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: app
-            image: ghcr.io/ovinc-cn/veilink
-            dockerfile: Dockerfile
-          - name: turn
-            image: ghcr.io/ovinc-cn/veilink-turn
-            dockerfile: deploy/coturn/Dockerfile
 
     steps:
       - name: Check out repository
@@ -55,7 +45,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ matrix.image }}
+          images: ghcr.io/ovinc-cn/veilink
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=${{ github.ref_name }},enable=${{ startsWith(github.ref, 'refs/tags/') }}
@@ -65,12 +55,12 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,mode=max,scope=app
           provenance: mode=max
           sbom: true

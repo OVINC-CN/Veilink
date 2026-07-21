@@ -144,3 +144,9 @@ vite.config.ts.timestamp-*
 
 .idea
 .DS_Store
+
+# Local visual QA artifacts
+/output/
+/design-qa.md
+/assets/design-reference-signal-glass.png
+/apps/web/src/visualQa.tsx

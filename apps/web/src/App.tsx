@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { ShieldCheck, SpinnerGap } from '@phosphor-icons/react'
 import {
   AttachmentMetadataSchema,
   ChatPayloadSchema,
   EncryptedChatFrameSchema,
   EncryptedFileChunkSchema,
   IdentityPublicKeySchema,
+  MemberIdSchema,
   NicknameSchema,
   PEER_CONNECTION_TIMEOUT_MS,
   PROTOCOL_VERSION,
@@ -21,13 +23,11 @@ import {
   type ReplyReference,
   type RoomSnapshot,
   type ServerSignalEnvelope,
-  type TurnCredentials,
 } from '@veilink/protocol'
 import { CreateRoomView } from './components/CreateRoomView'
 import { EntryShell } from './components/EntryShell'
 import { JoinRoomView } from './components/JoinRoomView'
 import { RoomCreatedView } from './components/RoomCreatedView'
-import { RoomShell } from './components/RoomShell'
 import { deriveRoomKeys } from './crypto/derive'
 import { FileDecryptor, encryptFile, hashFile, type EncryptedFileChunk as LocalEncryptedFileChunk } from './crypto/files'
 import {
@@ -43,17 +43,33 @@ import { bytesToBase64Url, randomId } from './lib/encoding'
 import type { ActiveRoom, AttachmentView, ChatMessage, Member, RichTextDocument } from './models'
 import { documentMentionsMember, notifyMention } from './mentionNotifications'
 import { validateMedia } from './mediaValidation'
-import { PeerMesh, type IceCredentials, type PeerSignalPayload } from './transport/PeerMesh'
+import {
+  buildRecoveryBundle,
+  clearRecovery,
+  hasRecoveryHint,
+  loadRecovery,
+  restoreIdentity,
+  restoreKeys,
+  restoreReplayCounters,
+  saveRecovery,
+} from './recovery'
+import { PeerMesh, type PeerSignalPayload } from './transport/PeerMesh'
 import { SignalClient, type SessionConfirmation } from './transport/SignalClient'
+
+const RoomShell = lazy(async () => {
+  const module = await import('./components/RoomShell')
+  return { default: module.RoomShell }
+})
 
 interface PublicConfig {
   protocolVersion: typeof PROTOCOL_VERSION
   limits: { maxMembers: number; maxRoomTtlMs: number; roomTtlMs: number; maxFileSizeMb: number }
   heartbeatIntervalMs: number
   disconnectGraceMs: number
+  iceServers: RTCIceServer[]
 }
 
-type Stage = 'create' | 'join' | 'created' | 'room'
+type Stage = 'create' | 'join' | 'created' | 'recovering' | 'room'
 
 const MAX_DATA_FRAME_BYTES = 128 * 1024
 const MAX_MESSAGES_IN_MEMORY = 500
@@ -101,7 +117,7 @@ interface SessionRuntime {
   outboundTransfers: Map<string, AbortController>
   transferEpoch: number
   unsubscribe: () => void
-  turnRefreshTimer?: number
+  resumeToken: string
 }
 
 interface PendingJoin {
@@ -110,6 +126,7 @@ interface PendingJoin {
   signal: SignalClient
   keys: DerivedKeys
   challenge: Awaited<ReturnType<SignalClient['beginJoin']>>
+  iceServers: RTCIceServer[]
 }
 
 function routeRoomId(): string | undefined {
@@ -155,6 +172,15 @@ async function loadPublicConfig(): Promise<PublicConfig> {
   if (value.protocolVersion !== PROTOCOL_VERSION) {
     throw new Error('服务器协议版本不受支持')
   }
+  if (!Array.isArray(value.iceServers) || value.iceServers.length > 8) {
+    throw new Error('服务器返回了无效的 STUN 配置')
+  }
+  for (const server of value.iceServers) {
+    const urls = Array.isArray(server.urls) ? server.urls : [server.urls]
+    if (urls.length === 0 || urls.some((url) => typeof url !== 'string' || !url.startsWith('stun:') || /\s/u.test(url))) {
+      throw new Error('服务器返回了非 STUN 的 ICE 配置')
+    }
+  }
   return value
 }
 
@@ -169,10 +195,6 @@ function previewKind(mime: string, previewable: boolean): AttachmentMetadata['pr
   if (mime.startsWith('video/')) return 'video'
   if (mime === 'application/pdf') return 'pdf'
   return 'download'
-}
-
-function turnIce(credentials: TurnCredentials): IceCredentials {
-  return { urls: credentials.urls, username: credentials.username, credential: credentials.credential }
 }
 
 function wipeKeys(keys: DerivedKeys): void {
@@ -277,7 +299,7 @@ export default function App() {
     delete window.__VEILINK_BOOTSTRAP_SECRET__
     return secret
   })
-  const [stage, setStage] = useState<Stage>(initialRoomId.current ? 'join' : 'create')
+  const [stage, setStage] = useState<Stage>(() => initialRoomId.current && hasRecoveryHint(initialRoomId.current) ? 'recovering' : initialRoomId.current ? 'join' : 'create')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
   const [room, setRoom] = useState<ActiveRoom>()
@@ -290,6 +312,8 @@ export default function App() {
   const entryIdentityRef = useRef<SessionIdentity | undefined>(undefined)
   const entryIdentityGenerationRef = useRef(0)
   const stopRuntimeRef = useRef<(sendLeave: boolean) => void>(() => undefined)
+  const persistRecoveryRef = useRef<() => Promise<boolean>>(async () => false)
+  const recoveryAttemptedRef = useRef(false)
   const [createdDetails, setCreatedDetails] = useState<{ pin: string; invitation: string }>()
   const [entryIdentityPublicKey, setEntryIdentityPublicKey] = useState<string>()
   const [entryIdentityBusy, setEntryIdentityBusy] = useState(false)
@@ -356,6 +380,7 @@ export default function App() {
     if (!resolved) return
     roomRef.current = resolved
     setRoom(resolved)
+    void persistRecoveryRef.current()
   }
 
   const updateMessages = (updater: (current: ChatMessage[]) => ChatMessage[]): void => {
@@ -373,6 +398,7 @@ export default function App() {
     }
     messagesRef.current = next
     setMessages(next)
+    void persistRecoveryRef.current()
   }
 
   const updateAttachment = (attachmentId: string, patchValue: Partial<AttachmentView>): void => {
@@ -382,12 +408,36 @@ export default function App() {
     })))
   }
 
+  const persistCurrentRecovery = (): Promise<boolean> => {
+    const runtime = runtimeRef.current
+    const current = roomRef.current
+    if (!runtime || !current) return Promise.resolve(false)
+    return saveRecovery(buildRecoveryBundle({
+      roomId: current.roomId,
+      memberId: current.memberId,
+      resumeToken: runtime.resumeToken,
+      linkSecret: runtime.linkSecret,
+      expiresAt: current.expiresAt,
+      identity: runtime.identity,
+      keys: runtime.keys,
+      replayCounters: runtime.replayCounters,
+      messages: messagesRef.current,
+    }))
+  }
+  persistRecoveryRef.current = persistCurrentRecovery
+
   const completeInitialConnectionIfReady = (runtime: SessionRuntime): void => {
-    if (
-      runtime.initialConnectionComplete ||
-      runtime.peerConnectionTimers.size > 0 ||
-      runtimeRef.current !== runtime
-    ) return
+    if (runtime.peerConnectionTimers.size > 0 || runtimeRef.current !== runtime) return
+    const current = roomRef.current
+    if (!current) return
+    const connected = new Set(runtime.mesh.connectedMemberIds())
+    const missing = current.members
+      .map((member) => member.id)
+      .filter((memberId) => memberId !== current.memberId && !connected.has(memberId))
+    if (missing.length > 0) {
+      for (const memberId of missing) armPeerConnectionTimer(runtime, memberId)
+      return
+    }
     runtime.initialConnectionComplete = true
     runtime.initialPeerIds.clear()
     setTransportReady(true)
@@ -408,13 +458,13 @@ export default function App() {
   const armPeerConnectionTimer = (runtime: SessionRuntime, memberId: string): void => {
     if (
       runtimeRef.current !== runtime ||
-      runtime.initialConnectionComplete ||
-      !runtime.initialPeerIds.has(memberId) ||
       !roomRef.current?.members.some((member) => member.id === memberId) ||
       memberId === roomRef.current?.memberId ||
       runtime.mesh.connectedMemberIds().includes(memberId) ||
       runtime.peerConnectionTimers.has(memberId)
     ) return
+    runtime.initialPeerIds.add(memberId)
+    runtime.initialConnectionComplete = false
     setTransportReady(false)
     const timer = window.setTimeout(() => {
       runtime.peerConnectionTimers.delete(memberId)
@@ -430,7 +480,8 @@ export default function App() {
       }
       setError('连接超时，已自动退出，请重试。')
       stopRuntime(true)
-      window.history.replaceState(null, '', '/')
+      clearRecovery()
+      window.history.replaceState(window.history.state, '', '/')
       initialRoomId.current = undefined
       setStage('create')
     }, PEER_CONNECTION_TIMEOUT_MS)
@@ -444,7 +495,7 @@ export default function App() {
       runtime.initialPeerIds.delete(memberId)
       clearPeerConnectionTimer(runtime, memberId)
     }
-    for (const memberId of runtime.initialPeerIds) armPeerConnectionTimer(runtime, memberId)
+    for (const member of members) armPeerConnectionTimer(runtime, member.id)
     completeInitialConnectionIfReady(runtime)
   }
 
@@ -459,7 +510,8 @@ export default function App() {
     if (violationWindow.violations < MAX_PEER_FRAME_VIOLATIONS || runtimeRef.current !== runtime) return
     setError('检测到成员持续发送无效或超限数据，已为保护本机内存自动退出。')
     stopRuntime(true)
-    window.history.replaceState(null, '', '/')
+    clearRecovery()
+    window.history.replaceState(window.history.state, '', '/')
     initialRoomId.current = undefined
     setStage('create')
   }
@@ -482,7 +534,6 @@ export default function App() {
       clearPeerConnectionTimers(runtime)
       runtime.mesh.destroy()
       cancelTransfers(runtime)
-      if (runtime.turnRefreshTimer !== undefined) window.clearTimeout(runtime.turnRefreshTimer)
       if (sendLeave) runtime.signal.leave()
       else runtime.signal.close()
       destroyIdentity(runtime.identity)
@@ -520,39 +571,21 @@ export default function App() {
   }
   stopRuntimeRef.current = stopRuntime
 
+  const abortForRecoveryFailure = (): void => {
+    stopRuntime(true)
+    clearRecovery()
+    window.history.replaceState(window.history.state, '', '/')
+    initialRoomId.current = undefined
+    setError('浏览器无法继续保存安全刷新状态，已退出房间以避免恢复到不安全的旧状态。')
+    setStage('create')
+  }
+
   useEffect(() => {
-    const pageHide = (): void => {
-      stopRuntimeRef.current(true)
-      discardEntryIdentity()
-      initialRoomId.current = undefined
-      window.history.replaceState(null, '', '/')
-      setStage('create')
-    }
-    window.addEventListener('pagehide', pageHide)
     return () => {
-      window.removeEventListener('pagehide', pageHide)
-      stopRuntimeRef.current(true)
+      stopRuntimeRef.current(false)
       discardEntryIdentity()
     }
   }, [discardEntryIdentity])
-
-  const scheduleTurnRefresh = (runtime: SessionRuntime, credentials: TurnCredentials): void => {
-    if (runtime.turnRefreshTimer !== undefined) window.clearTimeout(runtime.turnRefreshTimer)
-    const remaining = Math.max(0, credentials.expiresAt - Date.now())
-    const refreshLead = Math.min(15 * 60_000, Math.max(60_000, Math.floor(remaining / 3)))
-    const delay = Math.max(30_000, remaining - refreshLead)
-    runtime.turnRefreshTimer = window.setTimeout(() => {
-      void (async () => {
-        try {
-          const refreshed = await runtime.signal.requestTurnCredentials()
-          await runtime.mesh.refreshTurnCredentials(turnIce(refreshed))
-          scheduleTurnRefresh(runtime, refreshed)
-        } catch {
-          setError('TURN 临时凭据刷新失败，请重新加入。')
-        }
-      })()
-    }, delay)
-  }
 
   const processData = async (sourceMemberId: string, raw: string | ArrayBuffer): Promise<void> => {
     const runtime = runtimeRef.current
@@ -597,8 +630,15 @@ export default function App() {
           frame.counter,
         )
         if (!replayCounters) return
+        const previousReplayCounters = runtime.replayCounters
         runtime.replayCounters = replayCounters
+        if (!await persistCurrentRecovery()) {
+          runtime.replayCounters = previousReplayCounters
+          abortForRecoveryFailure()
+          return
+        }
         await processPayload(payload, sender, frame.sentAt, frame.messageId)
+        if (!await persistCurrentRecovery()) abortForRecoveryFailure()
       } catch {
         return
       }
@@ -753,13 +793,14 @@ export default function App() {
     identity: SessionIdentity,
     keys: DerivedKeys,
     secret: string,
+    iceServers: RTCIceServer[],
+    initialReplayCounters: ReadonlyMap<string, number> = new Map(),
   ): Promise<ActiveRoom> => {
     const initialRoom = activeRoomFromSnapshot(confirmation.snapshot, confirmation.selfMemberId, keys, secret)
-    const turnCredentials = await signal.requestTurnCredentials()
     const runtime = {} as SessionRuntime
     const mesh = new PeerMesh({
       localMemberId: initialRoom.memberId,
-      turnCredentials: turnIce(turnCredentials),
+      iceServers,
       sendSignal: (targetMemberId, payload) => {
         if (payload.description) signal.sendRtcDescription(targetMemberId as never, payload.description)
         if (payload.candidate) signal.sendRtcCandidate(targetMemberId as never, payload.candidate)
@@ -788,7 +829,8 @@ export default function App() {
         setError(caught instanceof Error ? caught.message : '无法处理服务器状态更新')
         if (frame.type === 'room.resumed' || frame.type === 'room.snapshot') {
           stopRuntime(false)
-          window.history.replaceState(null, '', '/')
+          clearRecovery()
+          window.history.replaceState(window.history.state, '', '/')
           initialRoomId.current = undefined
           setStage('create')
         }
@@ -800,7 +842,7 @@ export default function App() {
       mesh,
       keys,
       linkSecret: secret,
-      replayCounters: new Map(),
+      replayCounters: new Map(initialReplayCounters),
       peerRateWindows: new Map(),
       peerViolationWindows: new Map(),
       peerDataQueues: new Map(),
@@ -819,14 +861,72 @@ export default function App() {
       outboundTransfers: new Map(),
       transferEpoch: 0,
       unsubscribe,
+      resumeToken: confirmation.resumeToken,
     } satisfies SessionRuntime)
     runtimeRef.current = runtime
     updateRoom(initialRoom)
+    if (!await persistCurrentRecovery()) throw new Error('浏览器无法保存安全刷新检查点')
     mesh.syncMembers(initialRoom.members)
     armRoomConnectionTimers(runtime, initialRoom.members)
-    scheduleTurnRefresh(runtime, turnCredentials)
     return initialRoom
   }
+
+  // Recovery intentionally runs once for a routed room. The checkpoint is scoped
+  // to this browser history entry and tab, and the server rotates the resume token.
+  useEffect(() => {
+    if (stage !== 'recovering' || recoveryAttemptedRef.current) return
+    recoveryAttemptedRef.current = true
+    let cancelled = false
+    let signal: SignalClient | undefined
+    let identity: SessionIdentity | undefined
+    let keys: DerivedKeys | undefined
+
+    void (async () => {
+      const roomId = initialRoomId.current
+      if (!roomId) throw new Error('恢复路径无效')
+      const bundle = await loadRecovery(roomId)
+      if (!bundle) throw new Error('恢复信息已失效')
+      const publicConfig = await loadPublicConfig()
+      identity = restoreIdentity(bundle)
+      keys = restoreKeys(bundle)
+      signal = new SignalClient(roomId, publicConfig.disconnectGraceMs)
+      const confirmation = await signal.resumeRoom({
+        memberId: MemberIdSchema.parse(bundle.memberId),
+        resumeToken: bundle.resumeToken,
+        identityPublicKey: IdentityPublicKeySchema.parse(bundle.identity.publicKey),
+      })
+      if (cancelled) throw new Error('恢复已取消')
+      setLinkSecret(bundle.linkSecret)
+      await setupRuntime(confirmation, signal, identity, keys, bundle.linkSecret, publicConfig.iceServers, restoreReplayCounters(bundle))
+      signal = undefined
+      identity = undefined
+      keys = undefined
+      messagesRef.current = bundle.messages
+      setMessages(bundle.messages)
+      if (!await persistCurrentRecovery()) throw new Error('无法更新安全刷新检查点')
+      window.history.replaceState(window.history.state, '', `/room/${roomId}`)
+      setError(undefined)
+      setStage('room')
+    })().catch((caught: unknown) => {
+      if (cancelled) return
+      if (runtimeRef.current) stopRuntime(false)
+      else {
+        signal?.close()
+        if (identity) destroyIdentity(identity)
+        if (keys) wipeKeys(keys)
+      }
+      clearRecovery()
+      initialRoomId.current = undefined
+      window.history.replaceState(window.history.state, '', '/')
+      setError(caught instanceof Error ? `无法恢复会话：${caught.message}` : '无法恢复会话')
+      setStage('create')
+    })
+
+    return () => { cancelled = true }
+    // Recovery is deliberately tied only to the stage gate; both functions are
+    // recreated during render and the ref prevents duplicate recovery attempts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage])
 
   const handleServerFrame = async (frame: ServerSignalEnvelope): Promise<void> => {
     const runtime = runtimeRef.current
@@ -834,10 +934,12 @@ export default function App() {
     if (!runtime || !current || ('roomId' in frame && frame.roomId && frame.roomId !== current.roomId)) return
     if (frame.type === 'room.snapshot' || frame.type === 'room.resumed') {
       const snapshot = frame.type === 'room.snapshot' ? frame.payload : frame.payload.snapshot
+      if (frame.type === 'room.resumed') runtime.resumeToken = frame.payload.resumeToken
       const next = activeRoomFromSnapshot(snapshot, current.memberId, current.keys, current.linkSecret)
       updateRoom(next)
       runtime.mesh.syncMembers(next.members)
       armRoomConnectionTimers(runtime, next.members)
+      if (!await persistCurrentRecovery()) throw new Error('无法更新安全刷新检查点')
       return
     }
     if (frame.type === 'room.member.joined') {
@@ -850,6 +952,7 @@ export default function App() {
     }
     if (frame.type === 'room.member.left') {
       runtime.initialPeerIds.delete(frame.payload.memberId)
+      updateRoom((value) => ({ ...value, members: value.members.filter((member) => member.id !== frame.payload.memberId) }))
       clearPeerConnectionTimer(runtime, frame.payload.memberId)
       runtime.mesh.removePeer(frame.payload.memberId)
       runtime.peerRateWindows.delete(frame.payload.memberId)
@@ -872,7 +975,6 @@ export default function App() {
             ? { ...attachment, status: 'cancelled' }
             : attachment),
       })))
-      updateRoom((value) => ({ ...value, members: value.members.filter((member) => member.id !== frame.payload.memberId) }))
       return
     }
     if (frame.type === 'room.owner.changed') {
@@ -892,8 +994,9 @@ export default function App() {
     }
     if (frame.type === 'room.ended') {
       stopRuntime(false)
+      clearRecovery()
       setError(`连接已结束：${frame.payload.reason}`)
-      window.history.replaceState(null, '', '/')
+      window.history.replaceState(window.history.state, '', '/')
       setStage('create')
       return
     }
@@ -901,7 +1004,8 @@ export default function App() {
       setError(frame.payload.message)
       if (frame.payload.code === 'resume_rejected' || frame.payload.code === 'member_not_found') {
         stopRuntime(false)
-        window.history.replaceState(null, '', '/')
+        clearRecovery()
+        window.history.replaceState(window.history.state, '', '/')
         initialRoomId.current = undefined
         setStage('create')
       }
@@ -936,18 +1040,19 @@ export default function App() {
         admissionKey: keys.admissionKey,
         identityPublicKey: IdentityPublicKeySchema.parse(bytesToBase64Url(identity.publicKey)),
       })
-      await setupRuntime(confirmation, signal, identity, keys, secret)
+      await setupRuntime(confirmation, signal, identity, keys, secret, publicConfig.iceServers)
       keys = undefined
       identity = undefined
       signal = undefined
       const path = buildInvitePath(roomId, secret)
       const invitation = `${window.location.origin}${path}`
-      window.history.replaceState(null, '', `/room/${roomId}`)
+      window.history.replaceState(window.history.state, '', `/room/${roomId}`)
       initialRoomId.current = roomId
       setLinkSecret(secret)
       rememberNickname(nickname)
       setCreatedDetails({ pin, invitation })
       setStage('created')
+      void persistCurrentRecovery()
     } catch (caught) {
       stopRuntime(false)
       signal?.close()
@@ -972,10 +1077,11 @@ export default function App() {
         challengeId: pending.challenge.challengeId,
         challenge: pending.challenge.challenge,
       })
-      await setupRuntime(confirmation, pending.signal, pending.identity, pending.keys, linkSecret!)
+      await setupRuntime(confirmation, pending.signal, pending.identity, pending.keys, linkSecret!, pending.iceServers)
       rememberNickname(pending.nickname)
       pendingJoinRef.current = undefined
       setStage('room')
+      void persistCurrentRecovery()
     } catch (caught) {
       if (runtimeRef.current?.identity === pending.identity) {
         pendingJoinRef.current = undefined
@@ -1009,7 +1115,7 @@ export default function App() {
       keys = await deriveRoomKeys(pin, initialRoomId.current, linkSecret)
       signal = new SignalClient(initialRoomId.current, publicConfig.disconnectGraceMs)
       const challenge = await signal.beginJoin(nickname, IdentityPublicKeySchema.parse(bytesToBase64Url(identity.publicKey)))
-      pendingJoinRef.current = { nickname, identity, signal, keys, challenge }
+      pendingJoinRef.current = { nickname, identity, signal, keys, challenge, iceServers: publicConfig.iceServers }
       keys = undefined
       identity = undefined
       signal = undefined
@@ -1030,6 +1136,10 @@ export default function App() {
     if (!runtime || !current) throw new Error('安全连接尚未就绪')
     const validated = ChatPayloadSchema.parse(payload)
     const frame = await encryptChatPayload(validated, current.memberId, runtime.identity, runtime.keys.messageKey)
+    if (!await persistCurrentRecovery()) {
+      abortForRecoveryFailure()
+      throw new Error('无法安全保存发送状态')
+    }
     await runtime.mesh.broadcast(JSON.stringify(frame))
     return frame.messageId
   }
@@ -1163,8 +1273,9 @@ export default function App() {
 
   const leaveRoom = (): void => {
     stopRuntime(true)
+    clearRecovery()
     setLinkSecret(undefined)
-    window.history.replaceState(null, '', '/')
+    window.history.replaceState(window.history.state, '', '/')
     initialRoomId.current = undefined
     setStage('create')
   }
@@ -1176,8 +1287,33 @@ export default function App() {
     runtime.signal.destroyRoom()
   }
 
+  if (stage === 'recovering') {
+    return (
+      <EntryShell preferences={preferences} onPreferences={setPreferences}>
+        <div className="recovery-view" role="status" aria-live="polite">
+          <span className="recovery-symbol"><SpinnerGap /></span>
+          <span className="entry-eyebrow"><ShieldCheck weight="fill" />{preferences.locale === 'zh-CN' ? '标签页级安全恢复' : 'Tab-scoped secure recovery'}</span>
+          <h1>{preferences.locale === 'zh-CN' ? '正在回到对话' : 'Returning to your conversation'}</h1>
+          <p>{preferences.locale === 'zh-CN' ? '正在恢复加密身份并重新建立成员间的 P2P 直连。' : 'Restoring your encrypted identity and re-establishing direct P2P paths.'}</p>
+        </div>
+      </EntryShell>
+    )
+  }
+
   if (stage === 'room' && room) {
-    return <RoomShell room={room} messages={messages} preferences={preferences} connectionState={transportReady ? 'ready' : 'connecting'} error={error} onPreferences={setPreferences} onSend={sendDocument} onFiles={sendFiles} onLeave={leaveRoom} onDestroy={destroyRoom} />
+    return (
+      <Suspense fallback={(
+        <EntryShell preferences={preferences} onPreferences={setPreferences}>
+          <div className="recovery-view" role="status" aria-live="polite">
+            <span className="recovery-symbol"><SpinnerGap /></span>
+            <span className="entry-eyebrow"><ShieldCheck weight="fill" />{preferences.locale === 'zh-CN' ? '端到端加密会话' : 'End-to-end encrypted session'}</span>
+            <h1>{preferences.locale === 'zh-CN' ? '正在打开安全对话' : 'Opening your secure conversation'}</h1>
+          </div>
+        </EntryShell>
+      )}>
+        <RoomShell room={room} messages={messages} preferences={preferences} connectionState={transportReady ? 'ready' : 'connecting'} error={error} onPreferences={setPreferences} onSend={sendDocument} onFiles={sendFiles} onLeave={leaveRoom} onDestroy={destroyRoom} />
+      </Suspense>
+    )
   }
 
   return (

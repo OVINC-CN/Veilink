@@ -1,5 +1,3 @@
-import { fileTypeFromBuffer } from 'file-type'
-
 const previewable = new Set([
   'image/jpeg',
   'image/png',
@@ -31,6 +29,7 @@ export interface ValidatedMedia {
 
 export async function validateMedia(bytes: Uint8Array, declaredMime: string): Promise<ValidatedMedia> {
   if (looksLikeActiveText(bytes)) return { mime: 'application/octet-stream', previewable: false }
+  const { fileTypeFromBuffer } = await import('file-type')
   const detected = await fileTypeFromBuffer(bytes.subarray(0, Math.min(bytes.length, 8192)))
   const declared = declaredMime.toLowerCase()
   const mime = detected?.mime ?? declared

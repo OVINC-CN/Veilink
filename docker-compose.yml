@@ -10,15 +10,15 @@ services:
     logging:
       driver: "none"
     init: true
-    user: "1000:1000"
+    user: "65532:65532"
     read_only: true
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     pids_limit: 256
-    mem_limit: 512m
-    memswap_limit: 512m
+    mem_limit: 384m
+    memswap_limit: 384m
     mem_swappiness: 0
     ulimits:
       core:
@@ -29,86 +29,35 @@ services:
         hard: 4096
     stop_grace_period: 10s
     tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1700,uid=1000,gid=1000
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1700,uid=65532,gid=65532
     environment:
-      NODE_ENV: production
       HOST: 0.0.0.0
       PORT: 3000
-      WEB_DIST_DIR: /app/apps/web/dist
+      WEB_DIST_DIR: /app/web
       TLS_CERT_FILE: ${TLS_CERT_FILE:-}
       TLS_KEY_FILE: ${TLS_KEY_FILE:-}
       APP_ORIGIN: ${APP_ORIGIN:?Set APP_ORIGIN to the exact public HTTPS origin}
       TRUST_PROXY_CIDRS: ${TRUST_PROXY_CIDRS:?Set explicit reverse-proxy CIDRs}
       REDIS_URL: ${REDIS_URL:?Set the external Redis URL}
       REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-veilink}
+      STATE_HMAC_SECRET: ${STATE_HMAC_SECRET:?Generate an independent state HMAC secret}
+      STUN_URLS: ${STUN_URLS:?Set one or more STUN URLs; TURN is rejected}
       RECONNECT_GRACE_SECONDS: ${RECONNECT_GRACE_SECONDS:-30}
       ROOM_TTL_SECONDS: ${ROOM_TTL_SECONDS:-86400}
-      TURN_URLS: ${TURN_URLS:?Set the public TURN URLs}
-      TURN_REALM: ${TURN_REALM:-veilink}
-      TURN_REST_SECRET: ${TURN_REST_SECRET:?Generate a shared TURN REST secret}
-      TURN_CREDENTIAL_TTL_SECONDS: ${TURN_CREDENTIAL_TTL_SECONDS:-600}
       MAX_CONNECTIONS: ${MAX_CONNECTIONS:-2048}
       MAX_CONNECTIONS_PER_IP: ${MAX_CONNECTIONS_PER_IP:-64}
       MAX_ROOMS_PER_IP: ${MAX_ROOMS_PER_IP:-32}
       ROOM_CREATE_ATTEMPTS_PER_MINUTE: ${ROOM_CREATE_ATTEMPTS_PER_MINUTE:-20}
     ports:
       - "${APP_BIND_IP:-127.0.0.1}:${APP_PORT:-3000}:3000/tcp"
-    depends_on:
-      turn:
-        condition: service_started
     healthcheck:
       test:
         - CMD
-        - node
-        - -e
-        - "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        - /app/healthcheck
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
-    networks:
-      - veilink
-  turn:
-    image: ${VEILINK_TURN_IMAGE:-ghcr.io/ovinc-cn/veilink-turn:latest}
-    build:
-      context: .
-      dockerfile: deploy/coturn/Dockerfile
-    restart: unless-stopped
-    logging:
-      driver: "none"
-    user: "65534:65534"
-    read_only: true
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    pids_limit: 128
-    mem_limit: 256m
-    memswap_limit: 256m
-    mem_swappiness: 0
-    ulimits:
-      core:
-        soft: 0
-        hard: 0
-      nofile:
-        soft: 65536
-        hard: 65536
-    stop_grace_period: 10s
-    environment:
-      TURN_REALM: ${TURN_REALM:-veilink}
-      TURN_REST_SECRET: ${TURN_REST_SECRET:?Generate a shared TURN REST secret}
-      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:?Set the public TURN IPv4 address}
-      TURN_PRIVATE_IP: ${TURN_PRIVATE_IP:-}
-      TURN_MIN_PORT: ${TURN_MIN_PORT:-49160}
-      TURN_MAX_PORT: ${TURN_MAX_PORT:-49200}
-      TURN_TLS_ENABLED: "false"
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1700,uid=65534,gid=65534
-      - /var/lib/coturn:rw,noexec,nosuid,nodev,size=16m,mode=1700,uid=65534,gid=65534
-    ports:
-      - "${TURN_BIND_IP:-0.0.0.0}:3478:3478/tcp"
-      - "${TURN_BIND_IP:-0.0.0.0}:3478:3478/udp"
-      - "${TURN_BIND_IP:-0.0.0.0}:${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}:${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}/udp"
     networks:
       - veilink
 

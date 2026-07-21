@@ -1,193 +1,124 @@
-<h1 align="center">
-  <img src="assets/veilink-logo.png" alt="Veilink" width="256">
-</h1>
+# Veilink
 
-<p align="center">
-  <strong>隐私优先、阅后即清的浏览器聊天工具，消息与文件均采用端到端加密。</strong>
-</p>
+Veilink 是一个临时、端到端加密的浏览器聊天工具。新版前端采用三栏
+Signal Glass 界面，并默认跟随操作系统切换浅色和深色外观。
 
-<p align="center">
-  <a href="https://github.com/OVINC-CN/Veilink/actions/workflows/ci.yml"><img src="https://github.com/OVINC-CN/Veilink/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/OVINC-CN/Veilink/actions/workflows/images.yml"><img src="https://github.com/OVINC-CN/Veilink/actions/workflows/images.yml/badge.svg" alt="容器镜像"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/OVINC-CN/Veilink" alt="MIT 许可证"></a>
-</p>
+[English](README.md)
 
-<p align="center">
-  <a href="#功能特性">功能特性</a> ·
-  <a href="#项目架构">项目架构</a> ·
-  <a href="#快速开始">快速开始</a> ·
-  <a href="#容器部署">容器部署</a> ·
-  <a href="#安全与隐私">安全与隐私</a>
-</p>
+## 安全与传输模型
 
-<p align="center">
-  <a href="README.md">English</a> | <strong>简体中文</strong>
-</p>
+- 消息和文件只通过点对点 WebRTC DataChannel 传输。
+- STUN 只用于发现网络地址，不会转发聊天或文件数据。
+- Go 信令服务和浏览器客户端都会拒绝 TURN URL、`relay` ICE candidate，
+  以及包含 relay candidate 的 SDP。
+- DataChannel 打开后，浏览器还会通过 WebRTC stats 检查实际选中的 ICE
+  candidate pair。只有 `host`、`srflx` 或 `prflx` 路径通过验证后才允许
+  传输数据；无法证明是直连时会安全失败，不会降级到中继。
+- Go 服务只处理房间元数据、准入挑战、WebRTC 信令和短期恢复租约，无法
+  看到消息或文件明文。
+- 消息和文件密钥由浏览器使用邀请链接中的秘密派生，内容保持端到端加密。
 
-Veilink 不会将聊天内容上传到应用服务器。Redis 只保存带过期时间的房间、成员、准入、重连及滥用防护元数据，使仍打开的浏览器可在应用重启或切换副本后恢复。
+纯 P2P 有明确的可用性取舍：处于严格或对称 NAT 后的参与者可能无法建立
+连接，Veilink 不会回退到中继。同时，直连会让参与者彼此及其网络基础设施
+看到对方的网络地址。
 
-> **安全状态：** 项目目前仍是早期实现。用于敏感场景前，请自行审查威胁模型与部署配置。
+## 刷新恢复
 
-## 功能特性
+刷新活动房间时，客户端不会发送 `room.leave`。浏览器会把标签页级的加密
+检查点保存到 `sessionStorage`，AES-GCM 密钥保存在当前 history entry 中。
+检查点包含身份状态、房间派生密钥、轮换式恢复令牌、防重放计数器，以及最多
+100 条纯文本消息。关键计数器会在消息发送或显示前完成写入；文件内容不会被
+持久化。
 
-- 通过邀请链接及单独分享的 6 位 PIN 加入聊天室。
-- 浏览器本地使用链接密钥和 PIN 派生 E2EE 密钥；读取 URL Fragment 后立即从地址栏移除。
-- 聊天数据通过 TURN 中继的 WebRTC DataChannel 传输，Fastify 只负责房间成员、WebRTC 信令和短期中继凭据。
-- 所有 WebRTC 连接都强制通过 TURN，参与者之间不会建立直连或暴露彼此公网 IP。
-- 信令元数据带过期时间存入 Redis。空房会保留至有效期结束，应用重启或替换副本后浏览器可自动恢复连接。
-- 支持受限富文本、本地生成的隐私链接卡片，以及受支持附件的内存预览。
+Go 服务会在 `RECONNECT_GRACE_SECONDS` 内将成员租约保留在 Redis，并在每次
+成功恢复后轮换恢复令牌。主动离开、销毁房间、恢复过期或被拒绝、数据校验
+失败都会删除本地检查点。
 
-## 项目架构
+该机制用于同一标签页中的普通刷新，不是持久聊天记录，也不保证跨所有浏览器
+崩溃恢复。页面已被攻陷或恶意扩展能够访问页面时，无法靠本机制隐藏页面本来
+就能读取的密钥。
 
-项目采用 pnpm workspace：React/Vite 浏览器客户端、Fastify 信令服务器以及共享协议包。生产容器从同一个 Origin 提供前端和 API。应用与 coturn 共享部署密钥，并为客户端签发短期 REST/HMAC TURN 凭据。
+## 架构
 
-Redis 是信令元数据的权威存储，并负责应用副本之间的事件协调。系统仍不包含对象存储、文件上传接口或服务端聊天历史。应用可在支持 WebSocket 的负载均衡器后滚动发布多个副本，且不要求会话粘滞。
+```text
+浏览器 A  <-- 端到端加密 WebRTC DataChannel，仅直连 -->  浏览器 B
+    |                                                    |
+    +---------- WSS 信令与短期房间状态 -----------------+
+                             |
+                         Go 信令服务
+                             |
+                           Redis
+```
 
-## 环境要求
+- `apps/web`：React 与 Vite 客户端
+- `apps/server`：Go HTTP/WebSocket 信令服务
+- `packages/protocol`：浏览器侧数据结构与加密协议工具
 
-- 本地构建：Node.js 22、pnpm 11
-- 容器部署：Docker Engine、Docker Compose v2
-- TURN 主机具备公网 IPv4，并开放 UDP/TCP 3478 及 UDP 49160–49200
-- 公网聊天域名与有效 TLS 证书
-- 外部持久化、高可用 Redis；跨越可信私网边界时必须启用认证和 TLS
+后端实现与服务端进程只使用 Go，不需要 JavaScript 或 Node.js 运行时；Node.js
+只负责构建前端，产出的浏览器静态资源由 Go 提供。
 
-## 快速开始
+## 本地构建
 
-服务端测试与生产使用同一套 Redis 实现。请将 `REDIS_URL` 指向专用测试 Redis；测试会隔离键名且不会执行 `FLUSHDB`。
+依赖：
+
+- Go 1.26.5 或更高版本（服务端会拒绝存在已知漏洞的 1.26.0–1.26.4 运行时）
+- Node.js 22
+- pnpm 11
+- Redis 7.4 或更高版本
 
 ```bash
-export REDIS_URL=redis://127.0.0.1:6379/0
 pnpm install --frozen-lockfile
 pnpm lint
 pnpm typecheck
-pnpm test
 pnpm build
 ```
 
-构建后服务入口为 `apps/server/dist/index.js`。除 localhost 外必须使用 HTTPS，因为 WebRTC 和浏览器密码学 API 需要安全上下文。
+服务端二进制入口为 `apps/server/cmd/veilink`，前端产物位于
+`apps/web/dist`。启动二进制前先配置下列环境变量；生产服务从同一个 Origin
+提供前端和 API。
+
+## 配置
+
+复制 `.env.example` 到受保护的部署环境，并替换所有示例密钥和域名。
+
+| 变量 | 用途 |
+| --- | --- |
+| `APP_ORIGIN` | 浏览器实际 Origin；非回环地址必须使用 HTTPS |
+| `REDIS_URL` | Redis 地址；生产环境必须使用已认证且校验证书的 `rediss://` |
+| `REDIS_KEY_PREFIX` | 短期房间状态命名空间 |
+| `STATE_HMAC_SECRET` | 对滥用控制 IP 键进行假名化的独立密钥，至少 32 个字符 |
+| `STUN_URLS` | 逗号分隔的 `stun:` 发现服务；TURN 会被拒绝 |
+| `TRUST_PROXY_CIDRS` | 允许提供客户端 IP 的直接反向代理 CIDR |
+| `RECONNECT_GRACE_SECONDS` | 刷新/重连租约，默认 30 秒 |
+| `ROOM_TTL_SECONDS` | 房间元数据有效期，上限 86,400 秒 |
+| `MAX_CONNECTIONS` | Redis 全局连接上限 |
+| `MAX_CONNECTIONS_PER_IP` | 单 IP 连接上限 |
+| `MAX_ROOMS_PER_IP` | 单 IP 活动房间上限 |
+| `ROOM_CREATE_ATTEMPTS_PER_MINUTE` | 单 IP 每分钟创建次数 |
+
+`APP_ORIGIN` 必须与浏览器 `Origin` 请求头完全一致。只信任受控的直接代理
+节点。反向代理访问日志必须关闭或不可逆匿名化，因为房间 URL 和源 IP 都属于
+敏感元数据。
 
 ## 容器部署
 
-1. 复制并修改环境变量模板：
-
-   ```bash
-   cp .env.example .env
-   openssl rand -hex 32
-   ```
-
-   将生成值写入 `TURN_REST_SECRET`。把 `APP_ORIGIN` 设置为浏览器实际访问的完整 HTTPS Origin，配置 `REDIS_URL`，并替换所有示例 TURN 域名和 IP。`.env` 必须设置严格权限且不得提交到版本库。
-
-2. 检查 Compose 固定子网是否与主机现有网络冲突。如需修改，必须同时调整 `VEILINK_SUBNET`、`VEILINK_GATEWAY` 以及受信代理地址。
-
-3. 验证并启动：
-
-   ```bash
-   docker compose config --quiet
-   docker compose build
-   docker compose up -d
-   ```
-
-应用默认仅发布到 `127.0.0.1:3000`，必须放在外部 HTTPS 反向代理之后。coturn 对公网开放 UDP/TCP 3478 和配置的 UDP relay 端口段。Redis 位于本 Compose 项目之外；Compose 不创建本地持久卷，两个容器均使用只读根文件系统，仅将不可避免的运行时文件写入小型 tmpfs。
-Compose 还会禁用 Docker 容器日志驱动，避免 stdout/stderr 形成另一份持久连接日志；内存上限和“内存+交换区”上限设置为相同值，在容器运行时支持时阻止容器内存进入交换区，并禁用 Core Dump。
-
-应用也可以直接终止 HTTPS。将 `TLS_CERT_FILE` 和 `TLS_KEY_FILE` 同时设置为应用容器内可读的 PEM 路径，只读挂载这两个文件，在目标网卡上发布应用端口，并把 `APP_ORIGIN` 设置为完全一致的 HTTPS Origin。两个变量都留空时，继续使用默认的外部反向代理方案。
-
-Compose 会基于固定版本 `coturn/coturn:4.14.0-r0` 构建一层轻量镜像，复制上游二进制并去掉文件 Capability xattr，从而继续保留 `no-new-privileges` 和 `cap_drop: ALL`。否则 Linux 会以退出码 126 拒绝启动；该处理不会给运行时增加任何 Capability。
-main 分支会发布 `ghcr.io/ovinc-cn/veilink` 和 `ghcr.io/ovinc-cn/veilink-turn` 两套多架构镜像，同时生成 `latest`、不可变 `sha-*` 标签以及 SBOM/Provenance。推送 Git Tag 时，两套镜像还会直接使用该 Git Tag 作为镜像标签。生产环境应通过 `VEILINK_IMAGE` 和 `VEILINK_TURN_IMAGE` 固定到 `sha-*` 标签。
-
-### 反向代理与可信 IP
-
-反向代理必须支持 `/signal` 的 WebSocket Upgrade、保留原始 `Host`，并设置 `X-Forwarded-Proto: https`。只向用户公开 HTTPS。Nginx 最小配置示例：
-
-```nginx
-location / {
-    proxy_pass http://127.0.0.1:3000;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-Proto https;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-}
-```
-
-`TRUST_PROXY_CIDRS` 只能包含直接连接应用的代理节点。默认 Bridge 且代理位于 Docker 主机时，该节点为 `172.30.0.1/32`。禁止配置 `0.0.0.0/0`、宽泛私网段或无条件信任用户提交的转发头。如果代理也运行在容器中，应给它分配稳定地址并只信任该地址。
-
-**必须关闭反向代理访问日志，或不可逆地匿名化源 IP 和 URL。** Veilink 无法控制上游基础设施的日志策略。生产环境不要开启 Fastify、coturn 或 Docker 连接日志。确需排障时，只能在有记录的短时间窗口临时开启，并在结束后安全删除生成的日志。
-
-### TURN 网络
-
-`TURN_EXTERNAL_IP` 是向浏览器公布的公网地址。入口脚本会自动将其与 coturn 容器私网地址配对；仅在自动检测错误时设置 `TURN_PRIVATE_IP`。防火墙及上游 NAT 必须转发 `.env` 中完全相同的 3478 TCP/UDP 和 UDP relay 端口段。
-
-TCP 5349 的 TURN-over-TLS 为可选功能。它在 coturn 中终止，不能由普通 HTTP 反向代理代替。使用附带的 Overlay 只读挂载证书和私钥：
-
 ```bash
-docker compose -f docker-compose.yml \
-  -f docker-compose.turns.yml.example config --quiet
-docker compose -f docker-compose.yml \
-  -f docker-compose.turns.yml.example up -d
+docker compose --env-file .env.example config --quiet
+docker compose --env-file .env up -d --build
 ```
 
-启用后还需在 `TURN_URLS` 中加入 `turns:turn.example.com:5349?transport=tcp`。证书和私钥是唯一可选的宿主机挂载，且只包含部署密钥，不包含用户数据。
-私钥应通过宿主机所有权或 ACL 仅授权容器 UID 65534 读取，不要设置为全局可读。
+镜像使用静态链接的 Go 二进制和非 root distroless 运行时。Compose 会移除
+Linux capabilities、启用 `no-new-privileges`、使用只读根文件系统，并默认只在
+回环地址发布应用。部署中不再包含 TURN 服务，也不开放任何中继端口。
 
-## 主要配置
+请在加固的反向代理终止 TLS，或同时配置 `TLS_CERT_FILE` 与
+`TLS_KEY_FILE`。除 localhost 外，WebRTC 与浏览器密码学要求安全上下文。
 
-| 变量 | 用途 | 默认值/限制 |
-| --- | --- | --- |
-| `APP_ORIGIN` | 浏览器访问的完整公网 Origin | 必填 HTTPS URL |
-| `VEILINK_IMAGE`、`VEILINK_TURN_IMAGE` | 应用和加固 coturn 镜像标签 | 默认 GHCR `latest`；生产固定 `sha-*` |
-| `TLS_CERT_FILE`、`TLS_KEY_FILE` | 可选的应用原生 HTTPS PEM 路径 | 必须同时设置或同时留空 |
-| `TRUST_PROXY_CIDRS` | 直接反向代理的 CIDR | 必填、必须精确 |
-| `REDIS_URL` | 权威外部 Redis 地址 | 必填 `redis://` 或 `rediss://` URL |
-| `REDIS_KEY_PREFIX` | 按环境隔离的 Redis 命名空间 | `veilink` |
-| `RECONNECT_GRACE_SECONDS` | 浏览器及会话恢复窗口 | `30` |
-| `ROOM_TTL_SECONDS` | Redis 房间元数据存活时间 | `86400`，不可超过 |
-| `TURN_URLS` | 浏览器使用的 TURN URL，逗号分隔 | 必填 |
-| `TURN_REALM` | 应用和 coturn 共享的 Realm | `veilink` |
-| `TURN_REST_SECRET` | 应用和 coturn 共享的 HMAC 密钥 | 必填，使用 32 个随机字节 |
-| `TURN_CREDENTIAL_TTL_SECONDS` | 临时 TURN 凭据有效期（硬上限 600 秒） | `600` |
-| `MAX_CONNECTIONS` | 全局 WebSocket 连接上限 | `2048` |
-| `MAX_CONNECTIONS_PER_IP` | 单源 IP WebSocket 上限 | `64` |
-| `MAX_ROOMS_PER_IP` | 单源 IP 创建的活动房间上限 | `32` |
-| `ROOM_CREATE_ATTEMPTS_PER_MINUTE` | 单源 IP 每分钟建房尝试上限 | `20` |
-| `TURN_EXTERNAL_IP` | TURN 公网 IPv4 | 必填 |
-| `TURN_MIN_PORT`、`TURN_MAX_PORT` | 对外发布的 UDP relay 端口段 | `49160`–`49200` |
+## 运维说明
 
-6 位房间 PIN 不是服务器环境密钥，也不能通过环境变量配置。它由每个房间随机生成，仅在浏览器中与链接 Fragment 混合派生密钥。
-
-## 安全与隐私
-
-Veilink 会在 Redis 中持久化带过期时间的信令元数据，但绝不保存消息或文件内容。普通浏览器和操作系统无法绝对保证内存、Blob 实现、交换区、崩溃转储、历史同步、截图、扩展或下载文件从未写入存储介质。因此，“不留痕”是应用可控范围内的尽力保证，并非操作系统级承诺。
-
-服务器宿主机同样存在这一边界：Compose 会在运行时支持时禁用容器交换区和 Core Dump，但休眠、虚拟机快照、宿主机崩溃采集和物理内存策略仍由部署方负责。
-
-浏览器端只允许以下两类持久化例外：
-
-1. 用户明确选择下载的文件。
-2. localStorage 中的 `veilink.preferences.v1`：仅包含界面语言、主题、文件大小限制、发送快捷键、时间显示、密度，以及可选的“记住昵称”开关和值。
-
-此外，用户点击“复制”会主动把 PIN 或邀请链接交给系统剪贴板。剪贴板历史和云同步不受浏览器控制，可能在 Tab 关闭后继续保存；分享后应手动用无敏感内容覆盖剪贴板。
-
-房间 ID、链接密钥、PIN、派生密钥、指纹、消息、链接、附件、成员地址和重连 Token 不得写入 localStorage、sessionStorage、IndexedDB、Cache API 或 Service Worker Cache。关闭或刷新 Tab 时会清空应用内存并撤销 Blob URL。
-
-E2EE 可以阻止信令服务器和 TURN 服务器读取消息及文件内容，但不会向基础设施运营者隐藏连接元数据，也无法防御已失陷终端、恶意浏览器扩展或被替换的前端 JavaScript。强制中继可避免参与者获知彼此公网 IP，但基础设施运营者仍可观察连接元数据。
-
-Redis 记录包含房间 ID、准入校验值、成员昵称和公开身份密钥、重连 Token 哈希、会话租约以及用于滥用防护的 HMAC 标识；不会包含 PIN、链接密钥、派生 E2EE 密钥、消息/文件内容、明文重连 Token 或原始来源 IP。Redis 必须执行过期策略，并应按恢复要求配置持久化、高可用、访问控制、加密传输和运维备份。
-
-TURN REST 凭据和已建立的 allocation 无法按房间逐一即时吊销；默认凭据和 allocation 最长有效 10 分钟。房间销毁会立即删除应用内状态，但已有 TURN allocation 仍可能存活至 coturn 超时，且无法读取 E2EE 内容。
-
-## 运维检查
-
-- 首次从 Redis 接入前的版本升级时，无法导入只存在于旧进程内的房间；请为该次切换安排一次性会话中断。
-- 在 `RECONNECT_GRACE_SECONDS` 内滚动替换副本，并确保负载均衡器后至少有一个健康副本。
-- 监控 Redis 可用性和过期清理；应用会失败关闭，不会降级为各副本独立内存状态。
-- `TURN_REST_SECRET` 必须在应用和 coturn 中同步轮换；轮换会立即使现有 TURN 凭据失效。
-- 严格限制 `.env` 和 TLS 私钥权限，CI 中不得打印其内容。
-- 按隐私策略关闭或匿名化代理、负载均衡器、防火墙和 DNS 查询日志。
-- 定期更新 Node.js、基础镜像、coturn 和依赖；执行 `pnpm audit --prod` 并重新构建镜像。
-- 根据部署的数据保留策略备份 Redis 信令元数据；消息和文件内容仍不进入服务端存储。
-
-## 许可证
-
-[MIT](LICENSE)
+- Redis 只保存临时房间、成员、挑战、租约和限流元数据；应启用加密传输并
+  监控 TTL。
+- `STATE_HMAC_SECRET` 应协调轮换；轮换后滥用控制中的 IP 假名会重置。
+- 定期更新 Go、Node 构建工具、基础镜像和依赖。
+- 终端、前端产物、浏览器扩展或邀请秘密一旦失陷，端到端机密性也会失效。
+  生产环境应验证静态资源完整性并保护发布流水线。

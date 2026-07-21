@@ -482,6 +482,8 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
             type="file"
             multiple
             disabled={disabled}
+            tabIndex={-1}
+            aria-hidden="true"
             onChange={(event) => {
               const files = [...(event.target.files ?? [])]
               event.target.value = ''
@@ -514,7 +516,7 @@ export function ChatComposer({ connectionState, preferences, placeholder, sendLa
         {!editor || editor.isEmpty ? <span className="composer-placeholder">{placeholder}</span> : null}
         <div className="composer-actions">
           <span className="composer-shortcut" aria-hidden="true"><kbd>{preferences.sendShortcut === 'enter' ? '↵' : '⌘↵'}</kbd></span>
-          <button className="send-button" type="button" disabled={disabled || !editor || editor.isEmpty} onClick={() => void submit()}>
+          <button className="send-button" type="button" aria-label={sendLabel} disabled={disabled || !editor || editor.isEmpty} onClick={() => void submit()}>
             <PaperPlaneTilt weight="fill" />
             <span>{sendLabel}</span>
           </button>

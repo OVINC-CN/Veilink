@@ -1,10 +1,14 @@
 import { DownloadSimple, FilePdf, FilmSlate, ImageSquare, MagnifyingGlass, MusicNotes, X, XCircle } from '@phosphor-icons/react'
-import { useEffect, useId, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { t } from '../i18n'
 import type { AttachmentView } from '../models'
 import type { Locale } from '../preferences'
-import { PdfPreview } from './PdfPreview'
+
+const PdfPreview = lazy(async () => {
+  const module = await import('./PdfPreview')
+  return { default: module.PdfPreview }
+})
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -100,7 +104,7 @@ export function AttachmentPreview({ attachment, locale, onPreviewOpen }: Attachm
       ) : null}
       {previewableVideo ? <video src={attachment.objectUrl} controls preload="metadata" /> : null}
       {previewableAudio ? <audio src={attachment.objectUrl} controls preload="metadata" /> : null}
-      {previewablePdf ? <PdfPreview url={attachment.objectUrl!} name={attachment.name} /> : null}
+      {previewablePdf ? <Suspense fallback={null}><PdfPreview url={attachment.objectUrl!} name={attachment.name} /></Suspense> : null}
       {!imageUrl && !previewableVideo && !previewableAudio && !previewablePdf ? (
         <span className="attachment-type"><TypeIcon mime={attachment.mime} /></span>
       ) : null}

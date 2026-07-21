@@ -8,10 +8,10 @@
     "node": ">=22 <23"
   },
   "scripts": {
-    "build": "pnpm --stream -r build",
-    "typecheck": "pnpm --parallel --stream -r typecheck",
+    "build": "pnpm --stream -r build && GOTOOLCHAIN=local go build -C apps/server ./...",
+    "typecheck": "pnpm --parallel --stream -r typecheck && GOTOOLCHAIN=local go vet -C apps/server ./...",
     "test": "pnpm --stream -r test",
-    "lint": "eslint apps packages --max-warnings 0",
+    "lint": "eslint apps/web packages --max-warnings 0 && GOTOOLCHAIN=local go vet -C apps/server ./...",
     "audit": "pnpm audit --prod"
   },
   "devDependencies": {

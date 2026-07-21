@@ -188,13 +188,6 @@ const ClientRtcCandidateSchema = z
       .strict(),
   })
   .strict();
-const ClientTurnRefreshSchema = z
-  .object({
-    ...ClientEnvelopeBase,
-    type: z.literal("turn.credentials.refresh"),
-    payload: EmptyPayloadSchema,
-  })
-  .strict();
 const ClientHeartbeatSchema = z
   .object({
     ...ClientEnvelopeBase,
@@ -212,7 +205,6 @@ export const ClientSignalEnvelopeSchema = z.discriminatedUnion("type", [
   ClientRoomDestroySchema,
   ClientRtcDescriptionSchema,
   ClientRtcCandidateSchema,
-  ClientTurnRefreshSchema,
   ClientHeartbeatSchema,
 ]);
 export type ClientSignalEnvelope = z.infer<typeof ClientSignalEnvelopeSchema>;
@@ -319,28 +311,6 @@ const ServerRtcCandidateSchema = z
   })
   .strict();
 
-const TurnUrlSchema = z
-  .string()
-  .max(2_048)
-  .refine((value) => value.startsWith("turn:") || value.startsWith("turns:"), "Invalid TURN URL");
-export const TurnCredentialsSchema = z
-  .object({
-    urls: z.array(TurnUrlSchema).min(1).max(8),
-    username: z.string().min(1).max(256),
-    credential: z.string().min(1).max(512),
-    credentialType: z.literal("password"),
-    expiresAt: EpochMillisecondsSchema,
-  })
-  .strict();
-export type TurnCredentials = z.infer<typeof TurnCredentialsSchema>;
-
-const ServerTurnCredentialsSchema = z
-  .object({
-    ...ServerRoomEnvelopeBase,
-    type: z.literal("turn.credentials"),
-    payload: TurnCredentialsSchema,
-  })
-  .strict();
 const ServerHeartbeatAckSchema = z
   .object({
     ...ServerRoomEnvelopeBase,
@@ -401,7 +371,6 @@ export const ServerSignalEnvelopeSchema = z.discriminatedUnion("type", [
   ServerOwnerChangedSchema,
   ServerRtcDescriptionSchema,
   ServerRtcCandidateSchema,
-  ServerTurnCredentialsSchema,
   ServerHeartbeatAckSchema,
   ServerRoomEndedSchema,
   ServerErrorSchema,

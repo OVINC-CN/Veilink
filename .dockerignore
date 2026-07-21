@@ -19,5 +19,4 @@ coverage
 *.log
 report.*.json
 
-deploy/coturn/certs
 README*.md

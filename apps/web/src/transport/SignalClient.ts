@@ -14,7 +14,6 @@ import {
   type RoomId,
   type ServerSignalEnvelope,
   type ServerSignalType,
-  type TurnCredentials,
 } from '@veilink/protocol'
 
 interface PendingRequest {
@@ -25,6 +24,12 @@ interface PendingRequest {
 }
 
 interface ResumeState {
+  memberId: MemberId
+  resumeToken: string
+  identityPublicKey: IdentityPublicKey
+}
+
+export interface ResumeCredentials {
   memberId: MemberId
   resumeToken: string
   identityPublicKey: IdentityPublicKey
@@ -192,15 +197,26 @@ export class SignalClient {
     return response.payload
   }
 
-  async requestTurnCredentials(): Promise<TurnCredentials> {
+  async resumeRoom(input: ResumeCredentials): Promise<SessionConfirmation> {
+    await this.connect()
     const response = await this.request({
       v: PROTOCOL_VERSION,
-      type: 'turn.credentials.refresh',
+      type: 'room.resume',
       requestId: generateRequestId(),
       roomId: this.roomId,
-      payload: {},
-    }, ['turn.credentials'])
-    if (response.type !== 'turn.credentials') throw new Error('Unexpected TURN credential response')
+      payload: {
+        memberId: input.memberId,
+        resumeToken: input.resumeToken as never,
+        identityPublicKey: input.identityPublicKey,
+      },
+    }, ['room.resumed'])
+    if (response.type !== 'room.resumed') throw new Error('Unexpected resume response')
+    this.resumeState = {
+      memberId: response.payload.selfMemberId,
+      resumeToken: response.payload.resumeToken,
+      identityPublicKey: input.identityPublicKey,
+    }
+    this.startHeartbeat()
     return response.payload
   }
 
