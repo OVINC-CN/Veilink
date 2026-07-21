@@ -92,7 +92,7 @@ example secret or hostname.
 | Variable | Purpose |
 | --- | --- |
 | `APP_ORIGIN` | Exact browser origin; HTTPS is required outside loopback |
-| `REDIS_URL` | Redis URL; production requires authenticated `rediss://` with certificate verification |
+| `REDIS_URL` | Authenticated Redis URL; both `redis://` and `rediss://` are supported |
 | `REDIS_KEY_PREFIX` | Namespace for short-lived room state |
 | `STATE_HMAC_SECRET` | Independent secret used to pseudonymize abuse-control IP keys; at least 32 characters |
 | `STUN_URLS` | Comma-separated `stun:` discovery endpoints; TURN is rejected |
@@ -128,7 +128,7 @@ localhost.
 ## Operational notes
 
 - Redis stores only transient room, membership, challenge, lease, and rate-limit
-  metadata. Configure TTL monitoring and encrypted transport.
+  metadata. Configure TTL monitoring; prefer `rediss://` on untrusted networks.
 - Rotate `STATE_HMAC_SECRET` as a coordinated deployment; rotation resets IP
   pseudonyms used by abuse controls.
 - Patch Go, Node build tooling, base images, and dependencies regularly.

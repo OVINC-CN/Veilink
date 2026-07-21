@@ -189,9 +189,6 @@ func redisURL(value string) (string, error) {
 		return "", errors.New("REDIS_URL must be an absolute redis:// or rediss:// URL without query parameters")
 	}
 	loopback := parsed.Hostname() == "localhost" || parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "::1"
-	if parsed.Scheme != "rediss" && !loopback {
-		return "", errors.New("REDIS_URL must use rediss:// outside local development")
-	}
 	password := ""
 	hasPassword := false
 	if parsed.User != nil {

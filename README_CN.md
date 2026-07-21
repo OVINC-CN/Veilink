@@ -84,7 +84,7 @@ pnpm build
 | 变量 | 用途 |
 | --- | --- |
 | `APP_ORIGIN` | 浏览器实际 Origin；非回环地址必须使用 HTTPS |
-| `REDIS_URL` | Redis 地址；生产环境必须使用已认证且校验证书的 `rediss://` |
+| `REDIS_URL` | 带认证的 Redis 地址；支持 `redis://` 和 `rediss://` |
 | `REDIS_KEY_PREFIX` | 短期房间状态命名空间 |
 | `STATE_HMAC_SECRET` | 对滥用控制 IP 键进行假名化的独立密钥，至少 32 个字符 |
 | `STUN_URLS` | 逗号分隔的 `stun:` 发现服务；TURN 会被拒绝 |
@@ -116,8 +116,8 @@ Linux capabilities、启用 `no-new-privileges`、使用只读根文件系统，
 
 ## 运维说明
 
-- Redis 只保存临时房间、成员、挑战、租约和限流元数据；应启用加密传输并
-  监控 TTL。
+- Redis 只保存临时房间、成员、挑战、租约和限流元数据；应监控 TTL，并在
+  不可信网络中优先使用 `rediss://`。
 - `STATE_HMAC_SECRET` 应协调轮换；轮换后滥用控制中的 IP 假名会重置。
 - 定期更新 Go、Node 构建工具、基础镜像和依赖。
 - 终端、前端产物、浏览器扩展或邀请秘密一旦失陷，端到端机密性也会失效。
