@@ -166,6 +166,9 @@ const ClientRoomResumeSchema = z
 const ClientRoomLeaveSchema = z
   .object({ ...ClientEnvelopeBase, type: z.literal("room.leave"), payload: EmptyPayloadSchema })
   .strict();
+const ClientRoomRenewSchema = z
+  .object({ ...ClientEnvelopeBase, requestId: RequestIdSchema, type: z.literal("room.renew"), payload: EmptyPayloadSchema })
+  .strict();
 const ClientRoomDestroySchema = z
   .object({ ...ClientEnvelopeBase, type: z.literal("room.destroy"), payload: EmptyPayloadSchema })
   .strict();
@@ -214,6 +217,7 @@ export const ClientSignalEnvelopeSchema = z.discriminatedUnion("type", [
   ClientRoomJoinSchema,
   ClientRoomResumeSchema,
   ClientRoomLeaveSchema,
+  ClientRoomRenewSchema,
   ClientRoomDestroySchema,
   ClientRtcDescriptionSchema,
   ClientRtcCandidateSchema,

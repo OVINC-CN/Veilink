@@ -1,4 +1,5 @@
 import {
+  SignOut,
   WarningOctagon,
   X,
 } from '@phosphor-icons/react'
@@ -111,6 +112,85 @@ export function DestroyRoomDialog({
         <div className="dialog-actions">
           <button className="secondary-button" type="button" onClick={close}>{zh ? '取消' : 'Cancel'}</button>
           <button className="destructive-button" type="button" disabled={!destroyValid} onClick={destroy}>{zh ? '销毁房间' : 'Destroy room'}</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+export function LeaveRoomDialog({
+  room,
+  preferences,
+  open,
+  onClose,
+  onLeave,
+}: {
+  room: ActiveRoom
+  preferences: Preferences
+  open: boolean
+  onClose: () => void
+  onLeave: () => void
+}) {
+  const dialog = useRef<HTMLElement>(null)
+  const zh = preferences.locale === 'zh-CN'
+  const isOwner = room.ownerId === room.memberId
+  const hasOtherMembers = room.members.some((member) => member.id !== room.memberId)
+  const close = useCallback((): void => onClose(), [onClose])
+
+  useEffect(() => {
+    if (!open) return
+    const keepFocusInside = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        close()
+        return
+      }
+      if (event.key !== 'Tab' || !dialog.current) return
+      const focusable = [...dialog.current.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex]:not([tabindex="-1"])')]
+      const first = focusable[0]
+      const last = focusable.at(-1)
+      if (!first || !last) return
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', keepFocusInside)
+    return () => document.removeEventListener('keydown', keepFocusInside)
+  }, [close, open])
+
+  if (!open) return null
+
+  const message = isOwner
+    ? hasOtherMembers
+      ? (zh
+          ? '退出后，本设备将清除当前会话的安全恢复信息，且房主身份会自动移交给最早加入的其他成员。'
+          : 'This device will erase its secure recovery state, and host ownership will pass to the earliest remaining member.')
+      : (zh
+          ? '退出后，本设备将清除当前会话的安全恢复信息。房间会保留至到期，下一位加入的成员将成为房主。'
+          : 'This device will erase its secure recovery state. The room will remain until expiry, and the next member to join will become the host.')
+    : (zh
+        ? '退出后，本设备将清除当前会话的安全恢复信息，无法恢复为当前成员。'
+        : 'This device will erase its secure recovery state and cannot resume as the current member.')
+
+  const leave = (): void => {
+    close()
+    onLeave()
+  }
+
+  return (
+    <div className="modal-scrim" role="presentation" onPointerDown={(event) => { if (event.target === event.currentTarget) close() }}>
+      <section ref={dialog} className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="leave-room-title">
+        <button className="dialog-close icon-button" type="button" aria-label={zh ? '关闭' : 'Close'} onClick={close}><X /></button>
+        <span className="dialog-symbol"><SignOut weight="duotone" /></span>
+        <h2 id="leave-room-title">{zh ? '退出这个房间？' : 'Leave this room?'}</h2>
+        <p>{message}</p>
+        <div className="dialog-actions">
+          <button autoFocus className="secondary-button" type="button" onClick={close}>{zh ? '取消' : 'Cancel'}</button>
+          <button className="destructive-button" type="button" onClick={leave}>{zh ? '确认退出' : 'Leave room'}</button>
         </div>
       </section>
     </div>

@@ -25,6 +25,7 @@ interface RoomShellProps {
   onSend: (document: RichTextDocument, replyTo?: ReplyReference) => Promise<void> | void
   onFiles: (files: File[], replyTo?: ReplyReference) => Promise<boolean> | boolean
   onLeave: () => void
+  onRenew: () => Promise<void>
   onDestroy: () => Promise<void> | void
 }
 
@@ -236,6 +237,7 @@ export function RoomShell(props: RoomShellProps) {
         connectionState={props.connectionState}
         onPreferences={props.onPreferences}
         onLeave={props.onLeave}
+        onRenew={props.onRenew}
         onDestroy={props.onDestroy}
       />
       <main className="chat-main">

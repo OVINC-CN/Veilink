@@ -1287,18 +1287,24 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage])
 
+  const applyRoomSnapshot = async (snapshot: RoomSnapshot): Promise<void> => {
+    const runtime = runtimeRef.current
+    const current = roomRef.current
+    if (!runtime || !current || snapshot.roomId !== current.roomId) return
+    const next = activeRoomFromSnapshot(snapshot, current.memberId, current.keys, current.linkSecret, current.pin)
+    updateRoom(next)
+    runtime.mesh.syncMembers(next.members)
+    armRoomConnectionTimers(runtime, next.members)
+    if (!await persistCurrentRecovery()) throw new Error('无法更新安全刷新检查点')
+  }
+
   const handleServerFrame = async (frame: ServerSignalEnvelope): Promise<void> => {
     const runtime = runtimeRef.current
     const current = roomRef.current
     if (!runtime || !current || ('roomId' in frame && frame.roomId && frame.roomId !== current.roomId)) return
     if (frame.type === 'room.snapshot' || frame.type === 'room.resumed') {
-      const snapshot = frame.type === 'room.snapshot' ? frame.payload : frame.payload.snapshot
       if (frame.type === 'room.resumed') runtime.resumeToken = frame.payload.resumeToken
-      const next = activeRoomFromSnapshot(snapshot, current.memberId, current.keys, current.linkSecret, current.pin)
-      updateRoom(next)
-      runtime.mesh.syncMembers(next.members)
-      armRoomConnectionTimers(runtime, next.members)
-      if (!await persistCurrentRecovery()) throw new Error('无法更新安全刷新检查点')
+      await applyRoomSnapshot(frame.type === 'room.snapshot' ? frame.payload : frame.payload.snapshot)
       return
     }
     if (frame.type === 'room.member.joined') {
@@ -1667,6 +1673,19 @@ export default function App() {
     runtime.signal.destroyRoom()
   }
 
+  const renewRoom = async (): Promise<void> => {
+    const runtime = runtimeRef.current
+    if (!runtime) throw new Error('房间连接不可用')
+    setError(undefined)
+    try {
+      const snapshot = await runtime.signal.renewRoom()
+      await applyRoomSnapshot(snapshot)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '续期失败')
+      throw caught
+    }
+  }
+
   if (stage === 'invite-recovering') {
     return (
       <EntryShell preferences={preferences} onPreferences={setPreferences}>
@@ -1691,7 +1710,7 @@ export default function App() {
           </div>
         </EntryShell>
       )}>
-        <RoomShell room={room} messages={messages} preferences={preferences} connectionState={transportReady ? 'ready' : 'connecting'} error={error} onPreferences={setPreferences} onSend={sendDocument} onFiles={sendFiles} onLeave={leaveRoom} onDestroy={destroyRoom} />
+        <RoomShell room={room} messages={messages} preferences={preferences} connectionState={transportReady ? 'ready' : 'connecting'} error={error} onPreferences={setPreferences} onSend={sendDocument} onFiles={sendFiles} onLeave={leaveRoom} onRenew={renewRoom} onDestroy={destroyRoom} />
       </Suspense>
     )
   }

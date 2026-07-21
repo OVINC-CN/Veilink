@@ -425,6 +425,24 @@ func (c *connection) handle(parent context.Context, envelope protocol.ClientEnve
 		c.setBinding(nil)
 		c.close(websocket.StatusNormalClosure, "left room")
 		return nil
+	case "room.renew":
+		if envelope.RequestID == "" {
+			return actionError("invalid_request")
+		}
+		if _, err := protocol.DecodePayload[protocol.EmptyPayload](envelope.Payload); err != nil {
+			return actionError("invalid_request")
+		}
+		current := c.requireBinding(envelope.RoomID)
+		if current == nil {
+			return actionError("not_in_room")
+		}
+		snapshot, err := c.server.store.Renew(ctx, current.RoomID, current.MemberID, current.SessionID)
+		if err != nil {
+			return err
+		}
+		current.SnapshotVersion = snapshot.SnapshotVersion
+		c.setBinding(current)
+		return c.send(protocol.Frame("room.snapshot", current.RoomID, envelope.RequestID, snapshot))
 	case "room.destroy":
 		if _, err := protocol.DecodePayload[protocol.EmptyPayload](envelope.Payload); err != nil {
 			return actionError("invalid_request")

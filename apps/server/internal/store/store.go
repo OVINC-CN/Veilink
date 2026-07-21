@@ -158,6 +158,9 @@ if ARGV[2] == '' then
 else
   redis.call('SET', KEYS[1], ARGV[2], 'PXAT', ARGV[3])
   redis.call('ZADD', KEYS[2], ARGV[3], ARGV[4])
+  redis.call('ZADD', KEYS[6], ARGV[3], ARGV[4])
+  local creatorExpiry = redis.call('ZRANGE', KEYS[6], -1, -1, 'WITHSCORES')
+  if #creatorExpiry == 2 then redis.call('PEXPIREAT', KEYS[6], creatorExpiry[2]) end
 end
 if ARGV[6] == 'set' then
   redis.call('SET', KEYS[5], ARGV[7], 'PX', ARGV[8])
@@ -706,6 +709,52 @@ func (s *Store) Disconnect(ctx context.Context, roomID, memberID, sessionID stri
 
 func (s *Store) Leave(ctx context.Context, roomID, memberID, sessionID string) error {
 	return s.removeMember(ctx, roomID, memberID, sessionID, "left", true)
+}
+
+func (s *Store) Renew(ctx context.Context, roomID, memberID, sessionID string) (protocol.RoomSnapshot, error) {
+	for attempt := 0; attempt < 12; attempt++ {
+		now, err := s.now(ctx)
+		if err != nil {
+			return protocol.RoomSnapshot{}, err
+		}
+		loaded, err := s.loadRoom(ctx, roomID)
+		if err != nil {
+			return protocol.RoomSnapshot{}, err
+		}
+		found := false
+		for _, member := range loaded.room.Members {
+			if member.ID == memberID && member.SessionID == sessionID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return protocol.RoomSnapshot{}, &StoreError{ErrMemberNotFound}
+		}
+		if loaded.room.OwnerID == nil || *loaded.room.OwnerID != memberID {
+			return protocol.RoomSnapshot{}, &StoreError{ErrNotOwner}
+		}
+		loaded.room.ExpiresAt = now + s.roomTTL.Milliseconds()
+		loaded.room.SnapshotVersion++
+		snapshot, err := roomSnapshot(loaded.room, now)
+		if err != nil {
+			return protocol.RoomSnapshot{}, err
+		}
+		events := []any{WireEvent{
+			Kind:             "wire",
+			RoomID:           roomID,
+			ExcludedMemberID: memberID,
+			Event:            protocol.Frame("room.snapshot", "", "", snapshot),
+		}}
+		changed, err := s.casRoom(ctx, loaded, &loaded.room, nil, events, "", memberID, "", sessionID, now)
+		if err != nil {
+			return protocol.RoomSnapshot{}, err
+		}
+		if changed {
+			return snapshot, nil
+		}
+	}
+	return protocol.RoomSnapshot{}, errors.New("Redis room update contention exceeded retry limit")
 }
 
 func (s *Store) Destroy(ctx context.Context, roomID, memberID, sessionID string) error {

@@ -287,6 +287,18 @@ export class SignalClient {
     this.send({ v: PROTOCOL_VERSION, type: 'room.destroy', roomId: this.roomId, payload: {} })
   }
 
+  async renewRoom(): Promise<SessionConfirmation['snapshot']> {
+    const response = await this.request({
+      v: PROTOCOL_VERSION,
+      type: 'room.renew',
+      requestId: generateRequestId(),
+      roomId: this.roomId,
+      payload: {},
+    }, ['room.snapshot'])
+    if (response.type !== 'room.snapshot') throw new Error('Unexpected renew response')
+    return response.payload
+  }
+
   leave(): void {
     try {
       if (this.socket?.readyState === WebSocket.OPEN) {

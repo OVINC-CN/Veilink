@@ -4,6 +4,7 @@ import {
   CaretDown,
   Check,
   Clock,
+  ClockCounterClockwise,
   Copy,
   DotsThree,
   FileArrowUp,
@@ -23,7 +24,7 @@ import { mentionNotificationAvailability, requestMentionNotificationPermission }
 import type { ActiveRoom } from '../models'
 import type { Preferences } from '../preferences'
 import { Brand } from './Brand'
-import { DestroyRoomDialog, RoomMemberList } from './RoomSidePanel'
+import { DestroyRoomDialog, LeaveRoomDialog, RoomMemberList } from './RoomSidePanel'
 
 type Panel = 'details' | 'settings' | 'more' | null
 
@@ -33,6 +34,7 @@ interface RoomTopBarProps {
   connectionState: 'connecting' | 'ready'
   onPreferences: (next: Preferences) => void
   onLeave: () => void
+  onRenew: () => Promise<void>
   onDestroy: () => Promise<void> | void
 }
 
@@ -50,14 +52,18 @@ export function RoomTopBar({
   connectionState,
   onPreferences,
   onLeave,
+  onRenew,
   onDestroy,
 }: RoomTopBarProps) {
   const [panel, setPanel] = useState<Panel>(null)
+  const [leaveOpen, setLeaveOpen] = useState(false)
   const [destroyOpen, setDestroyOpen] = useState(false)
   const [copied, setCopied] = useState<'link' | 'pin' | null>(null)
+  const [renewalState, setRenewalState] = useState<'idle' | 'pending' | 'success'>('idle')
   const [requestingNotifications, setRequestingNotifications] = useState(false)
   const [remaining, setRemaining] = useState(() => formatRemaining(room.expiresAt))
   const root = useRef<HTMLElement>(null)
+  const renewalResetTimer = useRef<number | undefined>(undefined)
   const self = room.members.find((member) => member.id === room.memberId)
   const zh = preferences.locale === 'zh-CN'
   const notificationAvailability = mentionNotificationAvailability()
@@ -87,6 +93,10 @@ export function RoomTopBar({
     return () => window.clearInterval(timer)
   }, [room.expiresAt])
 
+  useEffect(() => () => {
+    if (renewalResetTimer.current !== undefined) window.clearTimeout(renewalResetTimer.current)
+  }, [])
+
   const toggle = (next: Exclude<Panel, null>): void => setPanel((current) => current === next ? null : next)
 
   const copySecret = async (kind: 'link' | 'pin', value: string): Promise<void> => {
@@ -110,6 +120,22 @@ export function RoomTopBar({
       notificationPromptDismissed: true,
     })
     setRequestingNotifications(false)
+  }
+
+  const renew = async (): Promise<void> => {
+    if (renewalState === 'pending') return
+    if (renewalResetTimer.current !== undefined) window.clearTimeout(renewalResetTimer.current)
+    setRenewalState('pending')
+    try {
+      await onRenew()
+      setRenewalState('success')
+      renewalResetTimer.current = window.setTimeout(() => {
+        setRenewalState('idle')
+        renewalResetTimer.current = undefined
+      }, 1_600)
+    } catch {
+      setRenewalState('idle')
+    }
   }
 
   return (
@@ -195,7 +221,8 @@ export function RoomTopBar({
                 <button className="menu-row" type="button" onClick={() => void copySecret('link', invitation)}>{copied === 'link' ? <Check /> : <Copy />}<span aria-live="polite">{copied === 'link' ? t(preferences.locale, 'copied') : t(preferences.locale, 'copyLink')}</span></button>
                 {pin ? <button className="menu-row" type="button" onClick={() => void copySecret('pin', pin)}>{copied === 'pin' ? <Check /> : <Key />}<span aria-live="polite">{copied === 'pin' ? t(preferences.locale, 'copied') : t(preferences.locale, 'copyPin')}</span></button> : null}
                 <span className="menu-separator" aria-hidden="true" />
-                <button className="menu-row" type="button" onClick={onLeave}><SignOut /><span>{t(preferences.locale, 'leave')}</span></button>
+                {isOwner ? <button className="menu-row" type="button" disabled={renewalState === 'pending'} onClick={() => void renew()}><ClockCounterClockwise /><span aria-live="polite">{renewalState === 'pending' ? (zh ? '正在续期…' : 'Renewing…') : renewalState === 'success' ? (zh ? '已续期' : 'Renewed') : (zh ? '续期房间' : 'Renew room')}</span></button> : null}
+                <button className="menu-row" type="button" onClick={() => { setPanel(null); setLeaveOpen(true) }}><SignOut /><span>{t(preferences.locale, 'leave')}</span></button>
                 {isOwner ? <button className="menu-row is-destructive" type="button" onClick={() => { setPanel(null); setDestroyOpen(true) }}><Trash /><span>{zh ? '销毁房间' : 'Destroy room'}</span></button> : null}
               </section>
             ) : null}
@@ -203,6 +230,7 @@ export function RoomTopBar({
         </nav>
       </div>
 
+      <LeaveRoomDialog room={room} preferences={preferences} open={leaveOpen} onClose={() => setLeaveOpen(false)} onLeave={onLeave} />
       <DestroyRoomDialog room={room} preferences={preferences} open={destroyOpen} onClose={() => setDestroyOpen(false)} onDestroy={onDestroy} />
     </header>
   )

@@ -100,6 +100,7 @@ describe('room workspace layout', () => {
         onSend={vi.fn()}
         onFiles={vi.fn()}
         onLeave={vi.fn()}
+        onRenew={vi.fn()}
         onDestroy={vi.fn()}
       />,
     )
