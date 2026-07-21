@@ -1,75 +1,117 @@
-# Veilink
+<p align="center">
+  <img src="apps/web/src/assets/brand/veilink-logo.png" alt="Veilink" width="256" />
+</p>
 
-Veilink is an ephemeral, end-to-end encrypted browser chat. The redesigned
-client uses a three-column Signal Glass interface and follows the operating
-system's light or dark appearance by default.
+<p align="center">
+  <strong>Private conversations that disappear when the room does.</strong>
+</p>
 
-[简体中文](README_CN.md)
+<p align="center">
+  An ephemeral, end-to-end encrypted browser chat for messages and files.<br />
+  No account, no cookies, and no server-side message history.
+</p>
 
-## Security and transport model
+<p align="center">
+  <a href="https://github.com/OVINC-CN/Veilink/actions/workflows/ci.yml"><img src="https://github.com/OVINC-CN/Veilink/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/OVINC-CN/Veilink/actions/workflows/images.yml"><img src="https://github.com/OVINC-CN/Veilink/actions/workflows/images.yml/badge.svg" alt="Container image" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/OVINC-CN/Veilink?style=flat-square" alt="MIT License" /></a>
+</p>
 
-- Messages and files travel over WebRTC DataChannels forced through Cloudflare
-  Realtime TURN. Direct and STUN-discovered paths are rejected.
-- The Go service exchanges its long-lived Cloudflare TURN key for short-lived
-  browser credentials; the long-lived key is never exposed to clients.
-- The Go signalling service and browser accept only `relay` ICE candidates and
-  SDP containing no candidates or relay candidates.
-- The Go server carries room metadata, admission challenges, WebRTC signalling,
-  and short-lived resume leases. It never receives plaintext messages or files.
-- Message and file payloads remain end-to-end encrypted with keys derived in the
-  browser from the invitation secret.
+<p align="center">
+  <a href="#features">Features</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#security-model">Security</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="README_CN.md">简体中文</a>
+</p>
 
-Cloudflare relays encrypted WebRTC packets and can observe network and traffic
-metadata, but the additional application encryption prevents it from reading
-message or file contents. TURN bandwidth usage grows with the number of members.
+---
 
-## Refresh recovery
+## Why Veilink?
 
-Refreshing an active room does not send `room.leave`. The browser stores a
-tab-scoped encrypted checkpoint in `sessionStorage`; its AES-GCM key is kept in
-the current history entry. The checkpoint contains the identity state, derived
-room keys, rotating resume token, replay counters, and up to 100 text-only
-messages. Critical counter updates are committed before a message is sent or
-displayed. File payloads are not persisted.
+Most chat services keep accounts, message history, or content on a central
+server. Veilink is designed for short-lived conversations instead: create a
+room, share the invitation link and six-digit PIN through separate channels,
+and talk directly from the browser. Rooms expire automatically, while the Go
+service only coordinates admission, signalling, and temporary membership.
 
-The Go server keeps the member lease in Redis for `RECONNECT_GRACE_SECONDS` and
-rotates the resume token after every successful restore. Explicit leave, room
-destruction, expired or rejected recovery, and validation failures erase the
-local checkpoint.
+## Features
 
-This mechanism survives an ordinary refresh in the same tab. It is not durable
-history, does not survive every browser crash, and does not protect a compromised
-page or malicious extension from secrets that are already accessible to that
-page.
+- **End-to-end encrypted** — messages and files are encrypted in the browser;
+  the signalling server and TURN relay never receive plaintext content.
+- **Relay-only WebRTC** — DataChannels are forced through Cloudflare Realtime
+  TURN. Direct and STUN-discovered paths are rejected to avoid exposing peer IPs.
+- **Safer invitations** — the invitation secret and six-digit PIN can be shared
+  through different channels.
+- **Ephemeral rooms** — up to 8 members, automatic expiry within 24 hours, owner
+  renewal and explicit room destruction.
+- **A complete chat experience** — rich text, links, quoted replies, `@mentions`,
+  private mention notifications, emoji, file transfer, and image/audio/video/PDF
+  previews.
+- **Refresh recovery** — encrypted tab-scoped checkpoints restore an active room
+  after an ordinary refresh without creating durable chat history.
+- **Built for self-hosting** — a single Go service serves both the API and the
+  compiled React client, with Redis for short-lived state and multi-architecture
+  container images for `linux/amd64` and `linux/arm64`.
+- **Responsive and bilingual** — desktop and mobile layouts, system/light/dark
+  themes, compact mode, English, and Simplified Chinese.
 
-## Architecture
+## How it works
+
+1. A host creates a room and receives an invitation link plus a six-digit PIN.
+2. Guests open the link and prove possession of the PIN-derived admission key.
+3. The Go service coordinates room state and WebRTC signalling; encrypted chat
+   and file payloads travel between browsers over relay-only DataChannels.
+4. The room expires automatically, or its owner destroys it immediately.
 
 ```text
-Browser A  <-- encrypted WebRTC -->  Cloudflare TURN  <-- encrypted WebRTC -->  Browser B
-    |                                                                            |
-    +---------------- WSS signalling and short-lived room state -----------------+
-                                         |
-                                  Go signalling server
-                                         |
-                                       Redis
+Browser A  <== encrypted WebRTC ==>  Cloudflare TURN  <== encrypted WebRTC ==>  Browser B
+    |                                                                               |
+    +------------------- WSS signalling and short-lived room state -----------------+
+                                            |
+                                   Go signalling server
+                                            |
+                                          Redis
 ```
 
-- `apps/web`: React and Vite client, including browser-side schemas and
-  cryptographic protocol helpers
-- `apps/server`: Go HTTP/WebSocket signalling service
+Veilink uses a peer mesh, so TURN bandwidth grows with the number of room
+members. Cloudflare can observe network and traffic metadata, but the additional
+application encryption prevents it from reading message or file contents.
 
-The backend implementation and server process use Go and require no JavaScript
-or Node.js runtime. Node.js is only a frontend build tool; Go serves the
-resulting browser assets as static files.
+## Quick start
 
-## Local build
+> [!IMPORTANT]
+> A deployment needs an external Redis instance and a Cloudflare Realtime TURN
+> key. Public deployments must use HTTPS.
+
+```bash
+git clone https://github.com/OVINC-CN/Veilink.git
+cd Veilink
+cp .env.example .env
+```
+
+Edit `.env` and replace every example hostname, credential, and secret. At a
+minimum, configure `APP_ORIGIN`, `REDIS_URL`, `STATE_HMAC_SECRET`,
+`CLOUDFLARE_TURN_KEY_ID`, `CLOUDFLARE_TURN_API_TOKEN`, and
+`TRUST_PROXY_CIDRS`.
+
+```bash
+docker compose --env-file .env config --quiet
+docker compose --env-file .env up -d --build
+```
+
+Compose publishes Veilink to `127.0.0.1:3000` by default. Put a hardened HTTPS
+reverse proxy in front of it, or configure native TLS. TURN is hosted by
+Cloudflare, so no local relay ports are required.
+
+### Build from source
 
 Requirements:
 
-- Go 1.26.5 or newer (the server refuses known-vulnerable 1.26.0–1.26.4 runtimes)
+- Go 1.26.5 or newer
 - Node.js 22
 - pnpm 11
-- Redis 7.4 or newer
+- Redis 7.4 or newer for a running deployment
 
 ```bash
 pnpm --dir apps/web install --frozen-lockfile
@@ -82,69 +124,95 @@ GOTOOLCHAIN=local go -C apps/server vet ./...
 GOTOOLCHAIN=local go -C apps/server build ./...
 ```
 
-The resulting server binary is built from `apps/server/cmd/veilink`. The client
-bundle is in `apps/web/dist`. Configure the variables below before starting the
-binary; it serves the client and API from one origin.
+The frontend bundle is written to `apps/web/dist`. The server entry point is
+`apps/server/cmd/veilink`; in production it serves the compiled browser assets
+and API from the same origin. Node.js is only required to build the frontend,
+not to run the server.
 
 ## Configuration
 
-Copy `.env.example` to a protected deployment environment and replace every
-example secret or hostname.
+Start with [`.env.example`](.env.example). Keep the finished file outside source
+control and generate independent secrets for each deployment.
 
-| Variable | Purpose |
+| Variable | Required | Description |
+| --- | :---: | --- |
+| `APP_ORIGIN` | Yes | Exact public browser origin; HTTPS is required outside loopback |
+| `REDIS_URL` | Yes | Authenticated `redis://` or `rediss://` URL |
+| `STATE_HMAC_SECRET` | Yes | Independent secret for pseudonymizing abuse-control IP keys; at least 32 characters |
+| `CLOUDFLARE_TURN_KEY_ID` | Yes | Cloudflare Realtime TURN key identifier |
+| `CLOUDFLARE_TURN_API_TOKEN` | Yes | Server-only token used to issue short-lived TURN credentials |
+| `TRUST_PROXY_CIDRS` | Proxy | CIDRs of the controlled direct reverse-proxy hop |
+| `ROOM_CREATION_PASSWORD` | No | Shared deployment password for creating rooms; empty allows public creation |
+| `REDIS_KEY_PREFIX` | No | Namespace for short-lived state; default `veilink` |
+| `TURN_CREDENTIAL_TTL_SECONDS` | No | TURN credential lifetime; default `90000` |
+| `RECONNECT_GRACE_SECONDS` | No | Refresh/reconnect lease; default `30` |
+| `ROOM_TTL_SECONDS` | No | Initial room lifetime and full lifetime restored by each host renewal; default and maximum `86400` |
+| `MAX_CONNECTIONS` | No | Global Redis-backed connection cap; default `2048` |
+| `MAX_CONNECTIONS_PER_IP` | No | Per-IP connection cap; default `64` |
+| `MAX_ROOMS_PER_IP` | No | Per-IP active room cap; default `32` |
+| `ROOM_CREATE_ATTEMPTS_PER_MINUTE` | No | Per-IP room creation rate; default `20` |
+
+`APP_ORIGIN` must exactly match the browser's `Origin` header. Only trust proxy
+headers from a controlled direct hop. Disable or irreversibly anonymize reverse
+proxy access logs because room URLs and source IPs are sensitive metadata.
+
+The optional room creation password controls who may create rooms on a
+deployment. It is separate from each room's invitation PIN and encryption
+secret, is never stored in Redis, and does not affect existing rooms.
+
+## Security model
+
+| Layer | Design |
 | --- | --- |
-| `APP_ORIGIN` | Exact browser origin; HTTPS is required outside loopback |
-| `REDIS_URL` | Authenticated Redis URL; both `redis://` and `rediss://` are supported |
-| `REDIS_KEY_PREFIX` | Namespace for short-lived room state |
-| `STATE_HMAC_SECRET` | Independent secret used to pseudonymize abuse-control IP keys; at least 32 characters |
-| `CLOUDFLARE_TURN_KEY_ID` | Cloudflare Realtime TURN key identifier |
-| `CLOUDFLARE_TURN_API_TOKEN` | Server-only token used to issue short-lived TURN credentials |
-| `TURN_CREDENTIAL_TTL_SECONDS` | Short-lived credential lifetime, default 90,000 seconds |
-| `ROOM_CREATION_PASSWORD` | Optional shared password for creating rooms; empty allows public creation |
-| `TRUST_PROXY_CIDRS` | Explicit CIDRs for the direct reverse-proxy hop |
-| `RECONNECT_GRACE_SECONDS` | Refresh/reconnect lease, default 30 seconds |
-| `ROOM_TTL_SECONDS` | Room metadata lifetime, maximum 86,400 seconds |
-| `MAX_CONNECTIONS` | Global Redis-backed connection cap |
-| `MAX_CONNECTIONS_PER_IP` | Per-IP connection cap |
-| `MAX_ROOMS_PER_IP` | Per-IP active room cap |
-| `ROOM_CREATE_ATTEMPTS_PER_MINUTE` | Per-IP creation rate |
+| Chat content | XChaCha20-Poly1305 authenticated encryption in the browser |
+| File transfer | Chunked XChaCha20-Poly1305 secret streams with digest verification |
+| Message identity | Per-session Ed25519 signatures and replay counters |
+| Key material | Derived in the browser from the invitation secret; long-lived TURN credentials stay server-side |
+| Peer transport | WebRTC DataChannels restricted to Cloudflare TURN relay candidates |
+| Server state | Room metadata, admission challenges, signalling, leases, and rate limits only |
 
-`APP_ORIGIN` must match the browser's `Origin` header exactly. Trust proxy
-headers only from a controlled direct hop. Disable or irreversibly anonymize
-reverse-proxy access logs because room URLs and source IPs are sensitive
-metadata.
+The Go service exchanges its long-lived Cloudflare TURN key for short-lived
+browser credentials. Both the browser and signalling service reject non-relay
+ICE candidates and SDP that contains direct candidates.
 
-The optional room creation password is a deployment-level authorization secret.
-It is not stored in Redis and is distinct from the six-digit invitation PIN and
-the invitation secret used to derive end-to-end encryption keys. Changing it
-does not affect existing rooms or joining an existing invitation. When enabled,
-serve the application over HTTPS so the password is sent only over WSS.
+### Refresh recovery
 
-## Container deployment
+During an ordinary same-tab refresh, Veilink stores an encrypted checkpoint in
+`sessionStorage`; its AES-GCM key remains in the current history entry. The
+checkpoint contains identity and room key state, a rotating resume token, replay
+counters, and up to 100 text-only messages. File payloads are never persisted.
 
-```bash
-docker compose --env-file .env.example config --quiet
-docker compose --env-file .env up -d --build
+Redis retains the member lease for `RECONNECT_GRACE_SECONDS`, and the resume
+token rotates after every successful restore. Explicit leave, room destruction,
+expired or rejected recovery, and validation failures erase the checkpoint.
+
+This is refresh recovery, not durable history. It does not protect against a
+compromised endpoint, frontend bundle, browser extension, or leaked invitation
+secret. Review the threat model before using Veilink for high-risk conversations.
+
+## Project structure
+
+```text
+Veilink/
+├── apps/
+│   ├── web/       # React, TypeScript, Vite, browser crypto and WebRTC
+│   └── server/    # Go HTTP/WebSocket signalling service
+├── Dockerfile     # Multi-stage, multi-architecture production image
+└── docker-compose.yml
 ```
 
-The image uses a statically linked Go binary in a non-root distroless runtime.
-Compose drops Linux capabilities, enables `no-new-privileges`, uses a read-only
-root filesystem and publishes the app on loopback by default. TURN is provided
-by Cloudflare Realtime, so the deployment does not expose local relay ports.
+The runtime image contains a statically linked Go binary in a non-root
+distroless container. Compose drops Linux capabilities, enables
+`no-new-privileges`, uses a read-only root filesystem, and disables application
+container logs by default.
 
-Terminate TLS at a hardened reverse proxy or configure both `TLS_CERT_FILE` and
-`TLS_KEY_FILE`. WebRTC and browser cryptography require a secure context outside
-localhost.
+## Contributing
 
-## Operational notes
+Issues and pull requests are welcome. Before opening a pull request, run the
+existing frontend checks and Go build commands from [Build from source](#build-from-source).
+Keep security-sensitive changes small, explain their threat-model impact, and
+never commit deployment credentials or invitation material.
 
-- Redis stores only transient room, membership, challenge, lease, and rate-limit
-  metadata. Configure TTL monitoring; prefer `rediss://` on untrusted networks.
-- Rotate `STATE_HMAC_SECRET` as a coordinated deployment; rotation resets IP
-  pseudonyms used by abuse controls.
-- Monitor Cloudflare TURN availability, credential issuance, and relay bandwidth
-  charges. Cloudflare Realtime TURN is not hosted on its China network.
-- Patch Go, Node build tooling, base images, and dependencies regularly.
-- A compromised endpoint, frontend bundle, browser extension, or invitation
-  secret defeats end-to-end confidentiality. Verify production asset integrity
-  and protect the deployment pipeline.
+## License
+
+Veilink is released under the [MIT License](LICENSE).
