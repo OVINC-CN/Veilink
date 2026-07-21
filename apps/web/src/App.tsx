@@ -1450,7 +1450,6 @@ export default function App() {
       keys = undefined
       signal = undefined
       setJoinAttempt((current) => current ? { ...current, finishedAt: Date.now() } : current)
-      setStage('room')
       void persistCurrentRecovery()
     } catch {
       pendingJoinRef.current = undefined
@@ -1664,7 +1663,7 @@ export default function App() {
   return (
     <EntryShell preferences={preferences} onPreferences={setPreferences}>
       {stage === 'create' ? <CreateRoomView preferences={preferences} busy={busy} avatarSeed={entryIdentityPublicKey} avatarBusy={entryIdentityBusy} creationPasswordRequired={roomCreationPasswordRequired} error={error} onRegenerateAvatar={regenerateEntryIdentity} onCreate={createRoom} /> : null}
-      {stage === 'join' ? <JoinRoomView preferences={preferences} hasLinkSecret={Boolean(linkSecret)} busy={busy} avatarSeed={entryIdentityPublicKey} avatarBusy={entryIdentityBusy} error={error} joinAttempt={joinAttempt} onRegenerateAvatar={regenerateEntryIdentity} onJoin={joinRoom} /> : null}
+      {stage === 'join' ? <JoinRoomView preferences={preferences} hasLinkSecret={Boolean(linkSecret)} busy={busy} avatarSeed={entryIdentityPublicKey ?? (joinAttempt?.finishedAt !== undefined && !joinAttempt.failure ? room?.members.find((member) => member.id === room.memberId)?.identityPublicKey : undefined)} avatarBusy={entryIdentityBusy} error={error} joinAttempt={joinAttempt} onRegenerateAvatar={regenerateEntryIdentity} onJoin={joinRoom} onEnter={() => setStage('room')} /> : null}
       {stage === 'created' && createdDetails ? <RoomCreatedView pin={createdDetails.pin} invitation={createdDetails.invitation} preferences={preferences} onContinue={() => { setCreatedDetails(undefined); setStage('room') }} /> : null}
     </EntryShell>
   )

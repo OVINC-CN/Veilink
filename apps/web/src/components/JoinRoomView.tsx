@@ -1,5 +1,5 @@
 import { PROTOCOL_VERSION } from '@veilink/protocol'
-import { ArrowsClockwise, CaretDown, Check, CheckCircle, Circle, Copy, Key, ShieldCheck, SpinnerGap, WarningCircle, XCircle } from '@phosphor-icons/react'
+import { ArrowRight, ArrowsClockwise, CaretDown, Check, CheckCircle, Circle, Copy, Key, ShieldCheck, SpinnerGap, WarningCircle, XCircle } from '@phosphor-icons/react'
 import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent } from 'react'
 import { t } from '../i18n'
 import type { JoinAttempt, JoinFailure, JoinPeerDiagnostic, JoinStep, JoinStepId } from '../joinDiagnostics'
@@ -16,6 +16,7 @@ interface JoinRoomViewProps {
   joinAttempt?: JoinAttempt
   onRegenerateAvatar: () => Promise<void> | void
   onJoin: (nickname: string, pin: string) => Promise<void> | void
+  onEnter: () => void
 }
 
 const stepLabels: Record<'zh-CN' | 'en-US', Record<JoinStepId, string>> = {
@@ -178,6 +179,9 @@ function JoinProgress({ attempt, locale }: { attempt: JoinAttempt; locale: 'zh-C
     ?? [...attempt.steps].reverse().find((step) => step.status === 'success' || step.status === 'skipped')
     ?? attempt.steps[0]
   const activeIndex = active ? attempt.steps.findIndex((step) => step.id === active.id) : 0
+  const completed = attempt.finishedAt !== undefined
+    && !attempt.failure
+    && attempt.steps.every((step) => step.status === 'success' || step.status === 'skipped')
   const failure = attempt.failure ? failureCopy(attempt.failure, locale) : undefined
   const copy = async (): Promise<void> => {
     try {
@@ -190,13 +194,19 @@ function JoinProgress({ attempt, locale }: { attempt: JoinAttempt; locale: 'zh-C
   }
 
   return (
-    <section className={`join-progress${attempt.failure ? ' has-failed' : ''}`} aria-label={zh ? '加入进度' : 'Join progress'}>
+    <section className={`join-progress${attempt.failure ? ' has-failed' : ''}${completed ? ' is-complete' : ''}`} aria-label={zh ? '加入进度' : 'Join progress'}>
       <div className="join-progress-toolbar">
         <button className="join-progress-summary" type="button" aria-expanded={expanded} onClick={() => setExpanded((current) => !current)}>
-          <span className="join-progress-icon">{attempt.failure ? <WarningCircle weight="fill" /> : <SpinnerGap className="is-spinning" />}</span>
+          <span className="join-progress-icon">{attempt.failure ? <WarningCircle weight="fill" /> : completed ? <CheckCircle weight="fill" /> : <SpinnerGap className="is-spinning" />}</span>
           <span>
-            <strong>{attempt.failure ? (zh ? `第 ${activeIndex + 1}/9 步失败` : `Failed at step ${activeIndex + 1}/9`) : (zh ? `第 ${activeIndex + 1}/9 步` : `Step ${activeIndex + 1}/9`)}</strong>
-            <small>{active ? stepLabels[locale][active.id] : ''} · {formatDuration((attempt.finishedAt ?? now) - attempt.startedAt)}</small>
+            <strong>{attempt.failure
+              ? (zh ? `第 ${activeIndex + 1}/9 步失败` : `Failed at step ${activeIndex + 1}/9`)
+              : completed
+                ? (zh ? '连接建立完成' : 'Connection established')
+                : (zh ? `第 ${activeIndex + 1}/9 步` : `Step ${activeIndex + 1}/9`)}</strong>
+            <small>{completed
+              ? `${zh ? '全部 9 个步骤已完成' : 'All 9 steps complete'} · ${formatDuration(attempt.finishedAt! - attempt.startedAt)}`
+              : `${active ? stepLabels[locale][active.id] : ''} · ${formatDuration((attempt.finishedAt ?? now) - attempt.startedAt)}`}</small>
           </span>
           <CaretDown className="join-progress-caret" />
         </button>
@@ -232,13 +242,19 @@ function JoinProgress({ attempt, locale }: { attempt: JoinAttempt; locale: 'zh-C
   )
 }
 
-export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, avatarBusy, error, joinAttempt, onRegenerateAvatar, onJoin }: JoinRoomViewProps) {
+export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, avatarBusy, error, joinAttempt, onRegenerateAvatar, onJoin, onEnter }: JoinRoomViewProps) {
   const [nickname, setNickname] = useState(preferences.rememberNickname ? preferences.nickname ?? '' : '')
   const [digits, setDigits] = useState<string[]>(() => Array.from({ length: 6 }, () => ''))
   const inputs = useRef<Array<HTMLInputElement | null>>([])
   const pin = digits.join('')
+  const ready = joinAttempt?.finishedAt !== undefined && !joinAttempt.failure
+  const locked = busy || ready
   const submit = (event: FormEvent): void => {
     event.preventDefault()
+    if (ready) {
+      onEnter()
+      return
+    }
     if (nickname.trim() && /^\d{6}$/u.test(pin) && hasLinkSecret) void onJoin(nickname, pin)
   }
   const setDigit = (index: number, rawValue: string): void => {
@@ -290,10 +306,10 @@ export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, ava
         <div className="avatar-picker">
           {avatarSeed ? <MemberAvatar seed={avatarSeed} label={t(preferences.locale, 'randomAvatar')} className="avatar-preview" /> : <span className="avatar-skeleton" aria-hidden="true" />}
           <div><strong>{t(preferences.locale, 'randomAvatar')}</strong><small>{t(preferences.locale, 'avatarEphemeral')}</small></div>
-          <button type="button" className="avatar-refresh" disabled={busy || avatarBusy} onClick={() => void onRegenerateAvatar()}><ArrowsClockwise />{avatarBusy ? t(preferences.locale, 'avatarGenerating') : t(preferences.locale, 'changeAvatar')}</button>
+          <button type="button" className="avatar-refresh" disabled={locked || avatarBusy} onClick={() => void onRegenerateAvatar()}><ArrowsClockwise />{avatarBusy ? t(preferences.locale, 'avatarGenerating') : t(preferences.locale, 'changeAvatar')}</button>
         </div>
-        <label>{t(preferences.locale, 'nickname')}<input autoFocus autoComplete="off" autoCapitalize="words" spellCheck="false" maxLength={64} type="text" value={nickname} placeholder={t(preferences.locale, 'nicknamePlaceholder')} disabled={busy} onChange={(event) => setNickname(event.target.value)} required /></label>
-        <fieldset className="pin-fieldset" disabled={busy}>
+        <label>{t(preferences.locale, 'nickname')}<input autoFocus autoComplete="off" autoCapitalize="words" spellCheck="false" maxLength={64} type="text" value={nickname} placeholder={t(preferences.locale, 'nicknamePlaceholder')} disabled={locked} onChange={(event) => setNickname(event.target.value)} required /></label>
+        <fieldset className="pin-fieldset" disabled={locked}>
           <legend>{t(preferences.locale, 'pin')}</legend>
           <div className="pin-inputs">
             {digits.map((digit, index) => (
@@ -319,7 +335,10 @@ export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, ava
         </fieldset>
         {joinAttempt ? <JoinProgress attempt={joinAttempt} locale={preferences.locale} /> : null}
         {error && !joinAttempt?.failure ? <div className="form-error" role="alert">{error}</div> : null}
-        <button className="primary-button" type="submit" disabled={busy || avatarBusy || !avatarSeed || !hasLinkSecret || !nickname.trim() || !/^\d{6}$/u.test(pin)}><Key weight="fill" />{busy ? t(preferences.locale, 'connecting') : joinAttempt?.failure ? (preferences.locale === 'zh-CN' ? '重试加入' : 'Retry join') : t(preferences.locale, 'join')}</button>
+        <button className="primary-button" type="submit" disabled={!ready && (busy || avatarBusy || !avatarSeed || !hasLinkSecret || !nickname.trim() || !/^\d{6}$/u.test(pin))}>
+          {ready ? <ArrowRight weight="bold" /> : <Key weight="fill" />}
+          {ready ? t(preferences.locale, 'enter') : busy ? t(preferences.locale, 'connecting') : joinAttempt?.failure ? (preferences.locale === 'zh-CN' ? '重试加入' : 'Retry join') : t(preferences.locale, 'join')}
+        </button>
       </form>
       <div className="privacy-callout entry-security"><ShieldCheck weight="fill" /><span>{preferences.locale === 'zh-CN' ? 'PIN 和链接密钥仅在本机派生 E2EE 密钥；服务器只接收域隔离的认证材料。' : 'The PIN and link secret derive E2EE keys only on this device; the server receives domain-separated authentication material.'}</span></div>
     </>

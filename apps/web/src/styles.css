@@ -386,7 +386,7 @@ button.message-reply-reference:active { transform: scale(.985); }
 .density-compact .message { padding-top: 5px; padding-bottom: 6px; }
 .density-compact .rich-text { line-height: 1.48; }
 
-.entry-shell { position: relative; isolation: isolate; display: grid; min-height: 100dvh; overflow: hidden; grid-template-rows: auto 1fr auto; padding: max(20px, env(safe-area-inset-top)) clamp(18px, 4vw, 42px) max(18px, env(safe-area-inset-bottom)); background: radial-gradient(circle at 50% 15%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 31%), var(--page); }
+.entry-shell { position: relative; isolation: isolate; display: grid; height: 100dvh; min-height: 0; overflow: hidden; grid-template-rows: auto minmax(0, 1fr) auto; padding: max(20px, env(safe-area-inset-top)) clamp(18px, 4vw, 42px) max(18px, env(safe-area-inset-bottom)); background: radial-gradient(circle at 50% 15%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 31%), var(--page); }
 .entry-ambient { position: fixed; z-index: -1; inset: 0; overflow: hidden; pointer-events: none; }
 .entry-ambient span { position: absolute; width: 430px; height: 430px; border-radius: 50%; background: color-mix(in srgb, var(--accent) 7%, transparent); filter: blur(1px); }
 .entry-ambient span:first-child { top: -280px; left: -120px; }
@@ -396,8 +396,8 @@ button.message-reply-reference:active { transform: scale(.985); }
 .entry-header-actions { display: flex; gap: 8px; }
 .entry-header .icon-button { background: var(--glass); -webkit-backdrop-filter: blur(18px) saturate(170%); backdrop-filter: blur(18px) saturate(170%); }
 .language-button { font-size: 12px; font-weight: 720; letter-spacing: .02em; }
-.entry-main { display: grid; width: min(100%, 480px); margin: auto; padding: clamp(40px, 8vh, 82px) 0; }
-.entry-panel { position: relative; padding: 0; border: 0; background: transparent; box-shadow: none; animation: entry-in 520ms cubic-bezier(.2, .8, .2, 1); }
+.entry-main { display: flex; width: min(100%, 480px); min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior-y: contain; margin: 0 auto; padding: clamp(32px, 6vh, 64px) 0; flex-direction: column; scrollbar-color: var(--border-strong) transparent; scroll-padding-block: 24px; }
+.entry-panel { position: relative; width: 100%; flex: 0 0 auto; margin: auto 0; padding: 0; border: 0; background: transparent; box-shadow: none; animation: entry-in 520ms cubic-bezier(.2, .8, .2, 1); }
 .entry-panel::before { display: none; content: none; }
 @keyframes entry-in { from { opacity: 0; transform: translateY(14px) scale(.985); filter: blur(5px); } to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); } }
 .entry-copy { margin-bottom: 24px; }
@@ -436,6 +436,7 @@ button.message-reply-reference:active { transform: scale(.985); }
 .entry-form input:disabled, .pin-fieldset:disabled { opacity: .62; cursor: wait; }
 .join-progress { overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in srgb, var(--surface-soft) 72%, transparent); }
 .join-progress.has-failed { border-color: color-mix(in srgb, var(--red) 28%, var(--border)); }
+.join-progress.is-complete { border-color: color-mix(in srgb, var(--green) 32%, var(--border)); }
 .join-progress-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) 38px; align-items: stretch; }
 .join-progress-summary { display: grid; min-width: 0; min-height: 58px; grid-template-columns: 28px minmax(0, 1fr) 18px; align-items: center; gap: 8px; padding: 8px 8px 8px 11px; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .join-progress-summary:hover, .join-copy-button:hover { background: var(--surface-hover); }
@@ -445,6 +446,7 @@ button.message-reply-reference:active { transform: scale(.985); }
 .join-progress-icon { display: grid; width: 26px; height: 26px; place-items: center; border-radius: 8px; background: var(--accent-soft); color: var(--accent); }
 .join-progress-icon svg { width: 16px; height: 16px; }
 .join-progress.has-failed .join-progress-icon { background: var(--red-soft); color: var(--red); }
+.join-progress.is-complete .join-progress-icon { background: color-mix(in srgb, var(--green) 12%, transparent); color: var(--green); }
 .join-progress-caret { width: 15px; height: 15px; color: var(--text-tertiary); transition: transform var(--ease-out); }
 .join-progress-summary[aria-expanded='true'] .join-progress-caret { transform: rotate(180deg); }
 .join-copy-button { display: grid; width: 38px; min-height: 38px; align-self: center; place-items: center; margin-right: 7px; border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary); cursor: pointer; }
@@ -453,7 +455,7 @@ button.message-reply-reference:active { transform: scale(.985); }
 .join-failure strong { font-size: 12px; }
 .join-failure span { font-size: 10px; line-height: 1.5; }
 .join-failure code { width: fit-content; margin-top: 3px; padding: 2px 5px; border-radius: 4px; background: color-mix(in srgb, var(--red) 9%, transparent); font-size: 9px; }
-.join-progress-details { max-height: min(440px, 48dvh); overflow-y: auto; padding: 4px 10px 10px; border-top: 1px solid var(--border); }
+.join-progress-details { max-height: min(360px, 42dvh); overflow-x: hidden; overflow-y: auto; padding: 4px 10px 10px; border-top: 1px solid var(--border); scrollbar-color: var(--border-strong) transparent; scrollbar-gutter: stable; -webkit-overflow-scrolling: touch; }
 .join-step-list { display: grid; gap: 0; margin: 0; padding: 7px 0 3px; list-style: none; }
 .join-step-list li { display: grid; min-width: 0; grid-template-columns: 23px minmax(0, 1fr); gap: 7px; padding: 6px 2px; }
 .join-step-icon { display: grid; width: 20px; height: 20px; place-items: center; color: var(--text-tertiary); }
@@ -567,9 +569,10 @@ button.message-reply-reference:active { transform: scale(.985); }
   .link-glyph { width: 44px; height: 44px; }
   .jump-to-latest { bottom: 133px; }
   .chat-main:has(.composer-reply) .jump-to-latest { bottom: 188px; }
-  .entry-shell { padding-right: 16px; padding-left: 16px; overflow-y: auto; }
-  .entry-main { padding: 36px 0; }
+  .entry-shell { padding-right: 16px; padding-left: 16px; overflow: hidden; }
+  .entry-main { padding: 24px 0; }
   .entry-panel { padding: 0; }
+  .join-progress-details { max-height: min(320px, 40dvh); }
   .entry-copy h1, .room-created h1 { font-size: 24px; }
   .secret-field { grid-template-columns: 1fr; }
   .secret-field strong, .secret-field code, .secret-field .top-action { grid-row: auto; grid-column: 1; }
