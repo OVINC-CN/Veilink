@@ -105,7 +105,7 @@ function stepStatusIcon(step: JoinStep) {
   if (step.status === 'active') return <SpinnerGap className="is-spinning" />
   if (step.status === 'success') return <CheckCircle weight="fill" />
   if (step.status === 'failed') return <XCircle weight="fill" />
-  if (step.status === 'skipped') return <Check weight="bold" />
+  if (step.status === 'skipped') return <CheckCircle weight="fill" />
   return <Circle />
 }
 
