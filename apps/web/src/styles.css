@@ -1161,7 +1161,7 @@ body { overflow: hidden; background: var(--page); }
   color: var(--text);
 }
 .settings-popover label.setting-row:hover { background: var(--surface-soft); }
-.setting-icon { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 8px; background: var(--surface-soft); color: var(--text-secondary); }
+.setting-icon { display: grid; width: 30px; height: 30px; place-items: center; color: var(--text-secondary); }
 .setting-icon svg { width: 16px; height: 16px; }
 .settings-popover .setting-copy { gap: 1px; }
 .settings-popover .setting-copy strong { font-size: 12px; font-weight: 610; }
