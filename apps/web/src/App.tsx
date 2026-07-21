@@ -439,12 +439,16 @@ export default function App() {
 
   const completeInitialConnectionIfReady = (runtime: SessionRuntime): void => {
     if (runtime.peerConnectionTimers.size > 0 || runtimeRef.current !== runtime) return
+    if (runtime.initialConnectionComplete) {
+      setTransportReady(true)
+      return
+    }
     const current = roomRef.current
     if (!current) return
     const connected = new Set(runtime.mesh.connectedMemberIds())
-    const missing = current.members
-      .map((member) => member.id)
-      .filter((memberId) => memberId !== current.memberId && !connected.has(memberId))
+    const currentMemberIds = new Set(current.members.map((member) => member.id))
+    const missing = [...runtime.initialPeerIds]
+      .filter((memberId) => currentMemberIds.has(memberId) && !connected.has(memberId))
     if (missing.length > 0) {
       for (const memberId of missing) armPeerConnectionTimer(runtime, memberId)
       return
@@ -469,13 +473,13 @@ export default function App() {
   const armPeerConnectionTimer = (runtime: SessionRuntime, memberId: string): void => {
     if (
       runtimeRef.current !== runtime ||
+      runtime.initialConnectionComplete ||
+      !runtime.initialPeerIds.has(memberId) ||
       !roomRef.current?.members.some((member) => member.id === memberId) ||
       memberId === roomRef.current?.memberId ||
       runtime.mesh.connectedMemberIds().includes(memberId) ||
       runtime.peerConnectionTimers.has(memberId)
     ) return
-    runtime.initialPeerIds.add(memberId)
-    runtime.initialConnectionComplete = false
     setTransportReady(false)
     const timer = window.setTimeout(() => {
       runtime.peerConnectionTimers.delete(memberId)
@@ -1004,7 +1008,6 @@ export default function App() {
       updateRoom((value) => ({ ...value, members: [...value.members.filter((item) => item.id !== member.id), member] }))
       const members = [...(roomRef.current?.members ?? [])]
       runtime.mesh.syncMembers(members)
-      armPeerConnectionTimer(runtime, member.id)
       return
     }
     if (frame.type === 'room.member.left') {

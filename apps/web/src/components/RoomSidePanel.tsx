@@ -41,11 +41,9 @@ export function RoomConnectionDetails({
 
   return (
     <div className="room-details-content">
-      <header className="room-details-header">
-        <span>
-          <strong>{zh ? '在线成员' : 'Online members'}</strong>
-          <small>{room.members.length}/8</small>
-        </span>
+      <header className="popover-title room-details-header">
+        <strong>{zh ? '人员列表' : 'Members'}</strong>
+        <small>{zh ? `${room.members.length}/8 人在线` : `${room.members.length}/8 online`}</small>
       </header>
 
       <ul className="room-member-list">

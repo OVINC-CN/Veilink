@@ -115,7 +115,7 @@ describe('room workspace layout', () => {
     fireEvent.click(membersButton)
     expect(membersButton).toHaveAttribute('aria-expanded', 'true')
 
-    const detailsPanel = screen.getByRole('region', { name: '连接详情' })
+    const detailsPanel = screen.getByRole('region', { name: '人员列表' })
     expect(within(detailsPanel).getByText('Cloudflare TURN 中继')).toBeInTheDocument()
     expect(within(detailsPanel).getByText('仅允许中继')).toBeInTheDocument()
     expect(within(detailsPanel).getByText('Mira（你）')).toBeInTheDocument()

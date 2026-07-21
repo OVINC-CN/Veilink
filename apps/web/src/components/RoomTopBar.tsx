@@ -113,7 +113,7 @@ export function RoomTopBar({
               <Users /><span>{room.members.length} {zh ? '人在线' : 'online'}</span><CaretDown />
             </button>
             {panel === 'details' ? (
-              <section className="popover details-popover" aria-label={zh ? '连接详情' : 'Connection details'}>
+              <section className="popover topbar-dropdown details-popover" aria-label={zh ? '人员列表' : 'Members'}>
                 <RoomConnectionDetails room={room} preferences={preferences} connectionState={connectionState} />
               </section>
             ) : null}
@@ -122,7 +122,7 @@ export function RoomTopBar({
           <div className="popover-anchor">
             <button className="icon-button top-icon" type="button" aria-label={t(preferences.locale, 'settings')} aria-expanded={panel === 'settings'} onClick={() => toggle('settings')}><GearSix /></button>
             {panel === 'settings' ? (
-              <section className="popover settings-popover" aria-label={t(preferences.locale, 'settings')}>
+              <section className="popover topbar-dropdown settings-popover" aria-label={t(preferences.locale, 'settings')}>
                 <div className="popover-title"><strong>{t(preferences.locale, 'settings')}</strong><small>{zh ? '按你的习惯调整会话' : 'Tune the room to your preferences'}</small></div>
 
                 <label className="setting-row">
@@ -172,7 +172,8 @@ export function RoomTopBar({
           <div className="popover-anchor">
             <button className="icon-button top-icon" type="button" aria-label={t(preferences.locale, 'more')} aria-expanded={panel === 'more'} onClick={() => toggle('more')}><DotsThree /></button>
             {panel === 'more' ? (
-              <section className="popover more-popover" aria-label={t(preferences.locale, 'more')}>
+              <section className="popover topbar-dropdown more-popover" aria-label={t(preferences.locale, 'more')}>
+                <div className="popover-title"><strong>{t(preferences.locale, 'more')}</strong><small>{zh ? '邀请与会话操作' : 'Invitation and room actions'}</small></div>
                 <button className="menu-row" type="button" onClick={() => void copySecret('link', invitation)}>{copied === 'link' ? <Check /> : <Copy />}<span aria-live="polite">{copied === 'link' ? t(preferences.locale, 'copied') : t(preferences.locale, 'copyLink')}</span></button>
                 {pin ? <button className="menu-row" type="button" onClick={() => void copySecret('pin', pin)}>{copied === 'pin' ? <Check /> : <Key />}<span aria-live="polite">{copied === 'pin' ? t(preferences.locale, 'copied') : t(preferences.locale, 'copyPin')}</span></button> : null}
                 <span className="menu-separator" aria-hidden="true" />
