@@ -21,7 +21,7 @@ export function RoomCreatedView({ pin, invitation, preferences, onContinue }: {
         <span className="entry-success-mark"><Check weight="bold" /></span>
         <span className="entry-eyebrow"><ShieldCheck weight="fill" />{zh ? '已就绪' : 'Ready'}</span>
         <h1>{zh ? '创建成功' : 'Created successfully'}</h1>
-        <p>{zh ? '通过两个不同渠道分别分享邀请链接和 PIN。继续后，PIN 将不再显示。' : 'Share the invitation link and PIN through two different channels. The PIN will not be shown again after you continue.'}</p>
+        <p>{zh ? '通过两个不同渠道分别分享邀请链接和 PIN。进入会话后仍可从更多菜单中复制。' : 'Share the invitation link and PIN through two different channels. You can copy them again from the More menu.'}</p>
       </div>
       <div className="secret-field secret-pin"><span><Key /> {zh ? '6 位 PIN' : '6-digit PIN'}</span><strong>{pin}</strong><button className="top-action" type="button" onClick={() => void copy('pin', pin)}>{copied === 'pin' ? <Check /> : <Copy />}{copied === 'pin' ? (zh ? '已复制' : 'Copied') : (zh ? '复制 PIN' : 'Copy PIN')}</button></div>
       <div className="secret-field"><span><LinkSimple /> {zh ? '邀请链接' : 'Invitation link'}</span><code>{zh ? '链接已生成' : 'Link generated'}</code><button className="top-action" type="button" onClick={() => void copy('link', invitation)}>{copied === 'link' ? <Check /> : <Copy />}{copied === 'link' ? (zh ? '已复制' : 'Copied') : (zh ? '复制链接' : 'Copy link')}</button></div>

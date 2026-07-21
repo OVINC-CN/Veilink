@@ -56,6 +56,7 @@ export interface ActiveRoom {
   ownerId: string
   expiresAt: number
   linkSecret: string
+  pin?: string
   fingerprint: string
   keys: DerivedKeys
   members: Member[]

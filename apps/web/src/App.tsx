@@ -122,6 +122,7 @@ interface SessionRuntime {
 
 interface PendingJoin {
   nickname: ReturnType<typeof NicknameSchema.parse>
+  pin: string
   identity: SessionIdentity
   signal: SignalClient
   keys: DerivedKeys
@@ -151,6 +152,7 @@ function activeRoomFromSnapshot(
   selfMemberId: string,
   keys: DerivedKeys,
   linkSecret: string,
+  pin?: string,
 ): ActiveRoom {
   const expiresAt = Date.now() + Math.max(0, snapshot.expiresAt - snapshot.serverNow)
   return {
@@ -159,6 +161,7 @@ function activeRoomFromSnapshot(
     ownerId: snapshot.ownerId,
     expiresAt,
     linkSecret,
+    ...(pin ? { pin } : {}),
     fingerprint: keys.fingerprint,
     keys,
     members: snapshot.members.map(memberFromWire),
@@ -417,6 +420,7 @@ export default function App() {
       memberId: current.memberId,
       resumeToken: runtime.resumeToken,
       linkSecret: runtime.linkSecret,
+      pin: current.pin,
       expiresAt: current.expiresAt,
       identity: runtime.identity,
       keys: runtime.keys,
@@ -793,10 +797,11 @@ export default function App() {
     identity: SessionIdentity,
     keys: DerivedKeys,
     secret: string,
+    pin: string | undefined,
     iceServers: RTCIceServer[],
     initialReplayCounters: ReadonlyMap<string, number> = new Map(),
   ): Promise<ActiveRoom> => {
-    const initialRoom = activeRoomFromSnapshot(confirmation.snapshot, confirmation.selfMemberId, keys, secret)
+    const initialRoom = activeRoomFromSnapshot(confirmation.snapshot, confirmation.selfMemberId, keys, secret, pin)
     const runtime = {} as SessionRuntime
     const mesh = new PeerMesh({
       localMemberId: initialRoom.memberId,
@@ -897,7 +902,7 @@ export default function App() {
       })
       if (cancelled) throw new Error('恢复已取消')
       setLinkSecret(bundle.linkSecret)
-      await setupRuntime(confirmation, signal, identity, keys, bundle.linkSecret, publicConfig.iceServers, restoreReplayCounters(bundle))
+      await setupRuntime(confirmation, signal, identity, keys, bundle.linkSecret, bundle.pin, publicConfig.iceServers, restoreReplayCounters(bundle))
       signal = undefined
       identity = undefined
       keys = undefined
@@ -935,7 +940,7 @@ export default function App() {
     if (frame.type === 'room.snapshot' || frame.type === 'room.resumed') {
       const snapshot = frame.type === 'room.snapshot' ? frame.payload : frame.payload.snapshot
       if (frame.type === 'room.resumed') runtime.resumeToken = frame.payload.resumeToken
-      const next = activeRoomFromSnapshot(snapshot, current.memberId, current.keys, current.linkSecret)
+      const next = activeRoomFromSnapshot(snapshot, current.memberId, current.keys, current.linkSecret, current.pin)
       updateRoom(next)
       runtime.mesh.syncMembers(next.members)
       armRoomConnectionTimers(runtime, next.members)
@@ -1040,7 +1045,7 @@ export default function App() {
         admissionKey: keys.admissionKey,
         identityPublicKey: IdentityPublicKeySchema.parse(bytesToBase64Url(identity.publicKey)),
       })
-      await setupRuntime(confirmation, signal, identity, keys, secret, publicConfig.iceServers)
+      await setupRuntime(confirmation, signal, identity, keys, secret, pin, publicConfig.iceServers)
       keys = undefined
       identity = undefined
       signal = undefined
@@ -1077,7 +1082,7 @@ export default function App() {
         challengeId: pending.challenge.challengeId,
         challenge: pending.challenge.challenge,
       })
-      await setupRuntime(confirmation, pending.signal, pending.identity, pending.keys, linkSecret!, pending.iceServers)
+      await setupRuntime(confirmation, pending.signal, pending.identity, pending.keys, linkSecret!, pending.pin, pending.iceServers)
       rememberNickname(pending.nickname)
       pendingJoinRef.current = undefined
       setStage('room')
@@ -1115,7 +1120,7 @@ export default function App() {
       keys = await deriveRoomKeys(pin, initialRoomId.current, linkSecret)
       signal = new SignalClient(initialRoomId.current, publicConfig.disconnectGraceMs)
       const challenge = await signal.beginJoin(nickname, IdentityPublicKeySchema.parse(bytesToBase64Url(identity.publicKey)))
-      pendingJoinRef.current = { nickname, identity, signal, keys, challenge, iceServers: publicConfig.iceServers }
+      pendingJoinRef.current = { nickname, pin, identity, signal, keys, challenge, iceServers: publicConfig.iceServers }
       keys = undefined
       identity = undefined
       signal = undefined

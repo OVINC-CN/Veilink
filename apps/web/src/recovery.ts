@@ -4,6 +4,7 @@ import {
   MemberIdSchema,
   MessageIdSchema,
   NicknameSchema,
+  PinSchema,
   ReplyReferenceSchema,
   RichTextDocumentSchema,
   ResumeTokenSchema,
@@ -64,6 +65,7 @@ export interface RecoveryBundle {
   memberId: string
   resumeToken: string
   linkSecret: string
+  pin?: string
   expiresAt: number
   savedAt: number
   identity: SerializedIdentity
@@ -155,7 +157,7 @@ function parseEnvelope(raw: string): StoredEnvelope | undefined {
 }
 
 function parseBundle(value: unknown): RecoveryBundle | undefined {
-  if (!isRecord(value) || value.v !== 1 || !exactKeys(value, ['v', 'roomId', 'memberId', 'resumeToken', 'linkSecret', 'expiresAt', 'savedAt', 'identity', 'keys', 'replayCounters', 'messages'])) return undefined
+  if (!isRecord(value) || value.v !== 1 || !exactKeys(value, ['v', 'roomId', 'memberId', 'resumeToken', 'linkSecret', ...(value.pin === undefined ? [] : ['pin']), 'expiresAt', 'savedAt', 'identity', 'keys', 'replayCounters', 'messages'])) return undefined
   const identity = value.identity
   const keys = value.keys
   if (
@@ -163,6 +165,7 @@ function parseBundle(value: unknown): RecoveryBundle | undefined {
     !MemberIdSchema.safeParse(value.memberId).success ||
     !ResumeTokenSchema.safeParse(value.resumeToken).success ||
     !LinkSecretSchema.safeParse(value.linkSecret).success ||
+    (value.pin !== undefined && !PinSchema.safeParse(value.pin).success) ||
     typeof value.expiresAt !== 'number' || !Number.isSafeInteger(value.expiresAt) ||
     typeof value.savedAt !== 'number' || !Number.isSafeInteger(value.savedAt) ||
     !isRecord(identity) ||
@@ -267,6 +270,7 @@ export function buildRecoveryBundle(input: {
   memberId: string
   resumeToken: string
   linkSecret: string
+  pin?: string
   expiresAt: number
   identity: SessionIdentity
   keys: DerivedKeys
@@ -279,6 +283,7 @@ export function buildRecoveryBundle(input: {
     memberId: input.memberId,
     resumeToken: input.resumeToken,
     linkSecret: input.linkSecret,
+    ...(input.pin ? { pin: input.pin } : {}),
     expiresAt: input.expiresAt,
     savedAt: Date.now(),
     identity: {

@@ -8,6 +8,7 @@ import {
   DotsThree,
   FileArrowUp,
   GearSix,
+  Key,
   Keyboard,
   Palette,
   Rows,
@@ -45,7 +46,7 @@ export function RoomTopBar({
 }: RoomTopBarProps) {
   const [panel, setPanel] = useState<Panel>(null)
   const [destroyOpen, setDestroyOpen] = useState(false)
-  const [copied, setCopied] = useState(false)
+  const [copied, setCopied] = useState<'link' | 'pin' | null>(null)
   const [requestingNotifications, setRequestingNotifications] = useState(false)
   const root = useRef<HTMLElement>(null)
   const self = room.members.find((member) => member.id === room.memberId)
@@ -53,6 +54,8 @@ export function RoomTopBar({
   const notificationAvailability = mentionNotificationAvailability()
   const roomLabel = room.fingerprint.replaceAll(' ', '').slice(-4).toUpperCase()
   const isOwner = room.ownerId === room.memberId
+  const invitation = `${window.location.origin}/room/${room.roomId}#${room.linkSecret}`
+  const pin = room.pin
 
   useEffect(() => {
     const close = (event: PointerEvent): void => {
@@ -71,10 +74,10 @@ export function RoomTopBar({
 
   const toggle = (next: Exclude<Panel, null>): void => setPanel((current) => current === next ? null : next)
 
-  const copyInvitation = async (): Promise<void> => {
-    await navigator.clipboard.writeText(`${window.location.origin}/room/${room.roomId}#${room.linkSecret}`)
-    setCopied(true)
-    window.setTimeout(() => setCopied(false), 1_600)
+  const copySecret = async (kind: 'link' | 'pin', value: string): Promise<void> => {
+    await navigator.clipboard.writeText(value)
+    setCopied(kind)
+    window.setTimeout(() => setCopied((current) => current === kind ? null : current), 1_600)
   }
 
   const changeMentionNotifications = async (enabled: boolean): Promise<void> => {
@@ -170,7 +173,8 @@ export function RoomTopBar({
             <button className="icon-button top-icon" type="button" aria-label={t(preferences.locale, 'more')} aria-expanded={panel === 'more'} onClick={() => toggle('more')}><DotsThree /></button>
             {panel === 'more' ? (
               <section className="popover more-popover" aria-label={t(preferences.locale, 'more')}>
-                <button className="menu-row" type="button" onClick={() => void copyInvitation()}>{copied ? <Check /> : <Copy />}<span aria-live="polite">{copied ? t(preferences.locale, 'copied') : t(preferences.locale, 'copyLink')}</span></button>
+                <button className="menu-row" type="button" onClick={() => void copySecret('link', invitation)}>{copied === 'link' ? <Check /> : <Copy />}<span aria-live="polite">{copied === 'link' ? t(preferences.locale, 'copied') : t(preferences.locale, 'copyLink')}</span></button>
+                {pin ? <button className="menu-row" type="button" onClick={() => void copySecret('pin', pin)}>{copied === 'pin' ? <Check /> : <Key />}<span aria-live="polite">{copied === 'pin' ? t(preferences.locale, 'copied') : t(preferences.locale, 'copyPin')}</span></button> : null}
                 <span className="menu-separator" aria-hidden="true" />
                 <button className="menu-row" type="button" onClick={onLeave}><SignOut /><span>{t(preferences.locale, 'leave')}</span></button>
                 {isOwner ? <button className="menu-row is-destructive" type="button" onClick={() => { setPanel(null); setDestroyOpen(true) }}><Trash /><span>{zh ? '销毁房间' : 'Destroy room'}</span></button> : null}

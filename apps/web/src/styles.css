@@ -1023,12 +1023,12 @@ body { overflow: hidden; background: var(--page); }
 .topbar::after { display: none; }
 .topbar-inner {
   display: flex;
-  width: 100%;
+  width: min(100%, var(--content-width));
   height: 100%;
   align-items: center;
   gap: 18px;
-  margin: 0;
-  padding: 0 18px;
+  margin: 0 auto;
+  padding: 0 var(--content-gutter);
 }
 .topbar-brand { display: flex; flex: 0 0 auto; align-items: center; }
 .topbar-brand .brand-logo { width: 108px; }
