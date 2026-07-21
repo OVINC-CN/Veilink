@@ -41,8 +41,8 @@ describe('minimal entry experience', () => {
   })
 })
 
-describe('selected single-column room layout', () => {
-  it('keeps secondary room information behind top-bar buttons', () => {
+describe('room workspace layout', () => {
+  it('exposes direct-connection details without TURN metadata', () => {
     const preferences = { ...defaultPreferences(), locale: 'zh-CN' as const }
     const room: ActiveRoom = {
       roomId: 'room-id',
@@ -75,7 +75,7 @@ describe('selected single-column room layout', () => {
         },
       ],
     }
-    const { container } = render(
+    render(
       <RoomShell
         room={room}
         messages={[]}
@@ -90,16 +90,22 @@ describe('selected single-column room layout', () => {
     )
 
     expect(screen.getByRole('main')).toHaveClass('chat-main')
-    expect(screen.getByRole('navigation', { name: '操作' })).toBeInTheDocument()
-    expect(container.querySelector('aside')).toBeNull()
-    expect(screen.getByText('TURN 中继')).toBeInTheDocument()
+    expect(screen.getByRole('navigation', { name: '房间视图' })).toBeInTheDocument()
+    expect(screen.getByRole('navigation', { name: '房间操作' })).toBeInTheDocument()
+    expect(screen.getByRole('complementary', { name: 'Veilink 导航' })).toBeInTheDocument()
+    const detailsPanel = screen.getByRole('complementary', { name: '连接详情' })
+    expect(within(detailsPanel).getByText('P2P 直连')).toBeInTheDocument()
+    expect(within(detailsPanel).getByText('无中继')).toBeInTheDocument()
+    expect(screen.queryByText('TURN 中继')).not.toBeInTheDocument()
 
-    const membersButton = screen.getByRole('button', { name: /成员 2/u })
+    const membersButton = screen.getByRole('button', { name: /成员与连接，2 人在线/u })
     expect(membersButton).toHaveAttribute('aria-expanded', 'false')
     fireEvent.click(membersButton)
     expect(membersButton).toHaveAttribute('aria-expanded', 'true')
 
-    const membersPanel = screen.getByRole('region', { name: '成员' })
-    expect(within(membersPanel).queryByText(/公网 IP/u)).not.toBeInTheDocument()
+    expect(detailsPanel).toHaveClass('is-open')
+    expect(within(detailsPanel).getByText('Mira（你）')).toBeInTheDocument()
+    expect(within(detailsPanel).getByText('River')).toBeInTheDocument()
+    expect(within(detailsPanel).queryByText(/公网 IP/u)).not.toBeInTheDocument()
   })
 })
