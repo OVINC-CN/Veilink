@@ -49,6 +49,12 @@ import {
   type JoinPeerDiagnostic,
   type JoinStepId,
 } from './joinDiagnostics'
+import {
+  clearInvitationRecovery,
+  hasInvitationRecoveryHint,
+  loadInvitationSecret,
+  saveInvitationSecret,
+} from './invitationRecovery'
 import { bytesToBase64Url, randomId } from './lib/encoding'
 import type { ActiveRoom, AttachmentView, ChatMessage, Member, RichTextDocument } from './models'
 import { documentMentionsMember, notifyMention } from './mentionNotifications'
@@ -79,7 +85,7 @@ interface PublicConfig {
   roomCreationPasswordRequired: boolean
 }
 
-type Stage = 'create' | 'join' | 'created' | 'recovering' | 'room'
+type Stage = 'create' | 'join' | 'created' | 'invite-recovering' | 'recovering' | 'room'
 
 const MAX_DATA_FRAME_BYTES = 128 * 1024
 const MAX_MESSAGES_IN_MEMORY = 500
@@ -381,7 +387,11 @@ export default function App() {
     delete window.__VEILINK_BOOTSTRAP_SECRET__
     return secret
   })
-  const [stage, setStage] = useState<Stage>(() => initialRoomId.current && hasRecoveryHint(initialRoomId.current) ? 'recovering' : initialRoomId.current ? 'join' : 'create')
+  const [stage, setStage] = useState<Stage>(() => {
+    if (initialRoomId.current && hasRecoveryHint(initialRoomId.current)) return 'recovering'
+    if (initialRoomId.current && !linkSecret && hasInvitationRecoveryHint(initialRoomId.current)) return 'invite-recovering'
+    return initialRoomId.current ? 'join' : 'create'
+  })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
   const [joinAttempt, setJoinAttempt] = useState<JoinAttempt>()
@@ -566,6 +576,24 @@ export default function App() {
   useEffect(() => {
     preferencesRef.current = preferences
   }, [preferences])
+
+  useEffect(() => {
+    if (stage !== 'join' || !initialRoomId.current || !linkSecret || runtimeRef.current) return
+    void saveInvitationSecret(initialRoomId.current, linkSecret)
+  }, [linkSecret, stage])
+
+  useEffect(() => {
+    if (stage !== 'invite-recovering' || !initialRoomId.current) return
+    let cancelled = false
+    const roomId = initialRoomId.current
+    void loadInvitationSecret(roomId).then((secret) => {
+      if (cancelled) return
+      if (secret) setLinkSecret(secret)
+      else clearInvitationRecovery()
+      setStage('join')
+    })
+    return () => { cancelled = true }
+  }, [stage])
 
   useEffect(() => {
     if (stage !== 'create') return
@@ -1450,6 +1478,7 @@ export default function App() {
       keys = undefined
       signal = undefined
       setJoinAttempt((current) => current ? { ...current, finishedAt: Date.now() } : current)
+      clearInvitationRecovery()
       void persistCurrentRecovery()
     } catch {
       pendingJoinRef.current = undefined
@@ -1618,6 +1647,7 @@ export default function App() {
   const leaveRoom = (): void => {
     stopRuntime(true)
     clearRecovery()
+    clearInvitationRecovery()
     setLinkSecret(undefined)
     window.history.replaceState(window.history.state, '', '/')
     initialRoomId.current = undefined
@@ -1629,6 +1659,19 @@ export default function App() {
     const runtime = runtimeRef.current
     if (!current || !runtime) return
     runtime.signal.destroyRoom()
+  }
+
+  if (stage === 'invite-recovering') {
+    return (
+      <EntryShell preferences={preferences} onPreferences={setPreferences}>
+        <div className="recovery-view" role="status" aria-live="polite">
+          <span className="recovery-symbol"><SpinnerGap /></span>
+          <span className="entry-eyebrow"><ShieldCheck weight="fill" />{preferences.locale === 'zh-CN' ? '标签页级邀请恢复' : 'Tab-scoped invitation recovery'}</span>
+          <h1>{preferences.locale === 'zh-CN' ? '正在加载邀请' : 'Loading your invitation'}</h1>
+          <p>{preferences.locale === 'zh-CN' ? '正在从当前标签页的加密恢复信息中读取邀请密钥。' : 'Reading the invitation secret from this tab\'s encrypted recovery data.'}</p>
+        </div>
+      </EntryShell>
+    )
   }
 
   if (stage === 'recovering') {
