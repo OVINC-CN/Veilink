@@ -32,10 +32,23 @@ export interface AttachmentView {
   name: string
   mime: string
   size: number
-  status: 'sending' | 'receiving' | 'ready' | 'rejected' | 'cancelled'
+  status: 'sending' | 'receiving' | 'ready' | 'partial' | 'rejected' | 'cancelled'
   progress: number
   previewable: boolean
   objectUrl?: string
+  recipients?: AttachmentRecipientView[]
+}
+
+export interface AttachmentRecipientView {
+  memberId: string
+  nickname: string
+  status: 'offered' | 'accepted' | 'transferring' | 'complete' | 'declined' | 'failed' | 'cancelled'
+  transferredBytes: number
+  progress: number
+  bytesPerSecond: number
+  etaSeconds?: number
+  rttMs?: number
+  availableOutgoingBitrate?: number
 }
 
 export interface ChatMessage {

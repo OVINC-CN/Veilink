@@ -20,7 +20,6 @@ import { base64UrlDecode } from "./encoding.js";
 import { FileNameSchema, NicknameSchema } from "./nickname.js";
 import {
   AttachmentIdSchema,
-  DigestSchema,
   EpochMillisecondsSchema,
   MemberIdSchema,
   MessageIdSchema,
@@ -403,7 +402,6 @@ export const AttachmentMetadataSchema = z
       .min(3)
       .max(127)
       .regex(/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/u),
-    digest: DigestSchema,
     previewKind: AttachmentPreviewKindSchema,
     chunkSize: z.literal(FILE_CHUNK_SIZE_BYTES),
     chunkCount: z.number().int().min(1).max(Math.ceil(MAX_FILE_SIZE_BYTES / FILE_CHUNK_SIZE_BYTES)),
@@ -478,18 +476,6 @@ export const EncryptedChatFrameSchema = z
   })
   .strict();
 export type EncryptedChatFrame = z.infer<typeof EncryptedChatFrameSchema>;
-
-export const EncryptedFileChunkSchema = z
-  .object({
-    v: z.literal(PROTOCOL_VERSION),
-    type: z.literal("file-chunk"),
-    attachmentId: AttachmentIdSchema,
-    chunkIndex: z.number().int().nonnegative().max(Math.ceil(MAX_FILE_SIZE_BYTES / FILE_CHUNK_SIZE_BYTES)),
-    final: z.boolean(),
-    ciphertext: boundedBase64Url(FILE_CHUNK_SIZE_BYTES + 64),
-  })
-  .strict();
-export type EncryptedFileChunk = z.infer<typeof EncryptedFileChunkSchema>;
 
 // Kept here so consumers have one bounded string constant for data-channel ICE diagnostics.
 export const IceDiagnosticSchema = z.string().max(MAX_ICE_CANDIDATE_LENGTH);

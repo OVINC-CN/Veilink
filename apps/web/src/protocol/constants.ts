@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 7 as const;
+export const PROTOCOL_VERSION = 8 as const;
 
 export const ROOM_ID_BYTES = 16;
 export const LINK_SECRET_BYTES = 32;
@@ -25,7 +25,9 @@ export const DEFAULT_MAX_FILE_SIZE_MB = 25;
 export const MIN_MAX_FILE_SIZE_MB = 1;
 export const MAX_MAX_FILE_SIZE_MB = 256;
 export const MAX_FILE_SIZE_BYTES = MAX_MAX_FILE_SIZE_MB * 1024 * 1024;
-export const FILE_CHUNK_SIZE_BYTES = 64 * 1024;
+// Keep the complete encrypted binary frame below the 64 KiB SCTP interoperability
+// boundary used by Safari and older embedded browsers.
+export const FILE_CHUNK_SIZE_BYTES = 60 * 1024;
 
 export const MAX_NICKNAME_GRAPHEMES = 24;
 export const MAX_NICKNAME_BYTES = 96;

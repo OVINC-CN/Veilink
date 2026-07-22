@@ -2,6 +2,7 @@ export * from "./constants.js";
 export * from "./content.js";
 export * from "./crypto.js";
 export * from "./encoding.js";
+export * from "./fileFrames.js";
 export * from "./identifiers.js";
 export * from "./nickname.js";
 export * from "./preferences.js";

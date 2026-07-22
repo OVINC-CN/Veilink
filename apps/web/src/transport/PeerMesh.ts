@@ -45,7 +45,15 @@ export interface PeerMeshOptions {
   onDiagnostic?: (memberId: string, event: PeerDiagnosticEvent) => void
 }
 
+export interface PeerTransportStats {
+  rttMs?: number
+  availableOutgoingBitrate?: number
+  bytesSent?: number
+}
+
 const MAX_PENDING_CANDIDATES = 64
+const SEND_BUFFER_HIGH_WATER_BYTES = 512 * 1024
+const SEND_BUFFER_LOW_WATER_BYTES = 128 * 1024
 
 function resolvePeerConnectionConstructor(): PeerConnectionConstructor {
   const browserGlobal = globalThis as LegacyPeerConnectionGlobal
@@ -202,19 +210,57 @@ export class PeerMesh {
   }
 
   async broadcast(data: string | ArrayBuffer): Promise<number> {
-    const channels = [...this.peers.values()]
-      .filter((peer) => peer.ready)
-      .map((peer) => peer.channel)
-      .filter((channel): channel is RTCDataChannel => channel?.readyState === 'open')
-    await Promise.all(channels.map(async (channel) => {
-      if (channel.bufferedAmount > 4 * 1024 * 1024) {
-        channel.bufferedAmountLowThreshold = 1024 * 1024
-        await new Promise<void>((resolve) => channel.addEventListener('bufferedamountlow', () => resolve(), { once: true }))
+    return await this.sendMany(this.connectedMemberIds(), data)
+  }
+
+  async send(memberId: string, data: string | ArrayBuffer): Promise<boolean> {
+    const peer = this.peers.get(memberId)
+    const channel = peer?.ready ? peer.channel : undefined
+    if (!channel || channel.readyState !== 'open') return false
+    await this.waitForSendCapacity(channel)
+    if (channel.readyState !== 'open') return false
+    if (typeof data === 'string') channel.send(data)
+    else channel.send(data)
+    return true
+  }
+
+  async sendMany(memberIds: readonly string[], data: string | ArrayBuffer): Promise<number> {
+    const results = await Promise.all(memberIds.map((memberId) => this.send(memberId, data)))
+    return results.filter(Boolean).length
+  }
+
+  async flush(memberIds: readonly string[]): Promise<void> {
+    await Promise.all(memberIds.map(async (memberId) => {
+      const peer = this.peers.get(memberId)
+      const channel = peer?.ready ? peer.channel : undefined
+      if (channel && channel.readyState === 'open' && channel.bufferedAmount > SEND_BUFFER_LOW_WATER_BYTES) {
+        await this.waitForBufferedAmountLow(channel)
       }
-      if (typeof data === 'string') channel.send(data)
-      else channel.send(data)
     }))
-    return channels.length
+  }
+
+  async transportStats(memberId: string): Promise<PeerTransportStats> {
+    const connection = this.peers.get(memberId)?.connection
+    if (!connection) return {}
+    const records = new Map<string, Record<string, unknown>>()
+    const report = await connection.getStats()
+    report.forEach((entry) => records.set(entry.id, entry as unknown as Record<string, unknown>))
+    let pair: Record<string, unknown> | undefined
+    for (const record of records.values()) {
+      if (record.type !== 'transport') continue
+      const pairId = statString(record, 'selectedCandidatePairId')
+      if (pairId) pair = records.get(pairId)
+    }
+    pair ??= [...records.values()].find((record) => record.type === 'candidate-pair' && record.state === 'succeeded' && (record.nominated === true || record.selected === true))
+    if (!pair) return {}
+    const rtt = typeof pair.currentRoundTripTime === 'number' ? pair.currentRoundTripTime : undefined
+    const bitrate = typeof pair.availableOutgoingBitrate === 'number' ? pair.availableOutgoingBitrate : undefined
+    const bytesSent = typeof pair.bytesSent === 'number' ? pair.bytesSent : undefined
+    return {
+      ...(rtt !== undefined ? { rttMs: Math.round(rtt * 1_000) } : {}),
+      ...(bitrate !== undefined ? { availableOutgoingBitrate: bitrate } : {}),
+      ...(bytesSent !== undefined ? { bytesSent } : {}),
+    }
   }
 
   async refreshIceServers(iceServers: RTCIceServer[]): Promise<void> {
@@ -293,6 +339,7 @@ export class PeerMesh {
     peer.channel = channel
     peer.ready = false
     channel.binaryType = 'arraybuffer'
+    channel.bufferedAmountLowThreshold = SEND_BUFFER_LOW_WATER_BYTES
     this.options.onDiagnostic?.(memberId, { type: 'channel', state: channel.readyState })
     channel.addEventListener('open', () => {
       if (this.destroyed) return
@@ -339,6 +386,30 @@ export class PeerMesh {
       if (!this.destroyed) this.syncMembers(this.knownMembers)
     }, 1_500)
     this.peerRebuildTimers.add(timer)
+  }
+
+  private async waitForSendCapacity(channel: RTCDataChannel): Promise<void> {
+    if (channel.bufferedAmount <= SEND_BUFFER_HIGH_WATER_BYTES) return
+    await this.waitForBufferedAmountLow(channel)
+  }
+
+  private waitForBufferedAmountLow(channel: RTCDataChannel): Promise<void> {
+    if (channel.readyState !== 'open') return Promise.reject(new Error('RTC data channel is not open'))
+    if (channel.bufferedAmount <= SEND_BUFFER_LOW_WATER_BYTES) return Promise.resolve()
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = (): void => {
+        channel.removeEventListener('bufferedamountlow', onLow)
+        channel.removeEventListener('close', onClose)
+        channel.removeEventListener('error', onError)
+      }
+      const onLow = (): void => { cleanup(); resolve() }
+      const onClose = (): void => { cleanup(); reject(new Error('RTC data channel closed while sending')) }
+      const onError = (): void => { cleanup(); reject(new Error('RTC data channel failed while sending')) }
+      channel.addEventListener('bufferedamountlow', onLow, { once: true })
+      channel.addEventListener('close', onClose, { once: true })
+      channel.addEventListener('error', onError, { once: true })
+      if (channel.bufferedAmount <= SEND_BUFFER_LOW_WATER_BYTES) onLow()
+    })
   }
 
   private scheduleNegotiationRetry(memberId: string, peer: PeerRecord): void {

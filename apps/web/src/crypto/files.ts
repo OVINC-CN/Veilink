@@ -1,8 +1,3 @@
-import sodium from 'libsodium-wrappers-sumo'
-import { base64UrlToBytes, bytesToBase64Url } from '../lib/encoding'
-
-const encoder = new TextEncoder()
-
 export interface EncryptedFileStart {
   fileId: string
   header: string
@@ -11,41 +6,67 @@ export interface EncryptedFileStart {
 export interface EncryptedFileChunk {
   fileId: string
   index: number
-  ciphertext: string
+  ciphertext: Uint8Array
   final: boolean
-  digest?: string
+  digest?: Uint8Array
 }
 
 export interface ExpectedFileMetadata {
-  digest: string
   size: number
   chunkSize: number
   chunkCount: number
 }
 
+type WorkerResponse =
+  | { type: 'ready'; header?: string }
+  | { type: 'chunk'; index: number; final: boolean; ciphertext: ArrayBuffer; digest?: ArrayBuffer }
+  | { type: 'decrypted'; blob?: Blob }
+  | { type: 'error'; message: string }
+
+function abortError(): DOMException {
+  return new DOMException('File transfer cancelled', 'AbortError')
+}
+
 function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
+  if (signal?.aborted) throw abortError()
 }
 
-export async function hashFile(file: File, signal?: AbortSignal): Promise<string> {
-  await sodium.ready
+function createFileWorker(): Worker {
+  return new Worker(new URL('./files.worker.ts', import.meta.url), { type: 'module' })
+}
+
+function requestWorker(
+  worker: Worker,
+  message: unknown,
+  transfer: Transferable[] = [],
+  signal?: AbortSignal,
+): Promise<WorkerResponse> {
   throwIfAborted(signal)
-  const hash = sodium.crypto_generichash_init(null, 32)
-  for (let offset = 0; offset < file.size; offset += 64 * 1024) {
-    const bytes = new Uint8Array(await file.slice(offset, Math.min(file.size, offset + 64 * 1024)).arrayBuffer())
-    try {
-      throwIfAborted(signal)
-      sodium.crypto_generichash_update(hash, bytes)
-    } finally {
-      sodium.memzero(bytes)
+  return new Promise<WorkerResponse>((resolve, reject) => {
+    const cleanup = (): void => {
+      worker.removeEventListener('message', onMessage)
+      worker.removeEventListener('error', onError)
+      signal?.removeEventListener('abort', onAbort)
     }
-  }
-  throwIfAborted(signal)
-  return bytesToBase64Url(sodium.crypto_generichash_final(hash, 32))
-}
-
-function deriveFileKey(rootFileKey: Uint8Array, fileId: string): Uint8Array {
-  return sodium.crypto_generichash(32, encoder.encode(`veilink/v1/file/${fileId}`), rootFileKey)
+    const onMessage = (event: MessageEvent<WorkerResponse>): void => {
+      cleanup()
+      if (event.data.type === 'error') reject(new Error(event.data.message))
+      else resolve(event.data)
+    }
+    const onError = (): void => {
+      cleanup()
+      reject(new Error('File crypto worker failed'))
+    }
+    const onAbort = (): void => {
+      cleanup()
+      worker.terminate()
+      reject(abortError())
+    }
+    worker.addEventListener('message', onMessage)
+    worker.addEventListener('error', onError)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    worker.postMessage(message, transfer)
+  })
 }
 
 export async function encryptFile(
@@ -56,68 +77,39 @@ export async function encryptFile(
   onChunk: (chunk: EncryptedFileChunk) => Promise<void> | void,
   signal?: AbortSignal,
 ): Promise<void> {
-  await sodium.ready
-  throwIfAborted(signal)
-  const key = deriveFileKey(rootFileKey, fileId)
-  const stream = sodium.crypto_secretstream_xchacha20poly1305_init_push(key)
-  const hash = sodium.crypto_generichash_init(null, 32)
-  throwIfAborted(signal)
-  await onStart({ fileId, header: bytesToBase64Url(stream.header) })
-  let offset = 0
-  let index = 0
+  const worker = createFileWorker()
+  const key = rootFileKey.slice()
   try {
-    while (offset < file.size || (file.size === 0 && index === 0)) {
-      throwIfAborted(signal)
-      const nextOffset = Math.min(file.size, offset + 64 * 1024)
-      const bytes = new Uint8Array(await file.slice(offset, nextOffset).arrayBuffer())
-      try {
-        throwIfAborted(signal)
-        const final = nextOffset >= file.size
-        sodium.crypto_generichash_update(hash, bytes)
-        const encrypted = sodium.crypto_secretstream_xchacha20poly1305_push(
-          stream.state,
-          bytes,
-          encoder.encode(`${fileId}|${index}`),
-          final
-            ? sodium.crypto_secretstream_xchacha20poly1305_TAG_FINAL
-            : sodium.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE,
-        )
-        await onChunk({
-          fileId,
-          index,
-          ciphertext: bytesToBase64Url(encrypted),
-          final,
-          ...(final ? { digest: bytesToBase64Url(sodium.crypto_generichash_final(hash, 32)) } : {}),
-        })
-        throwIfAborted(signal)
-      } finally {
-        sodium.memzero(bytes)
-      }
-      offset = nextOffset
-      index += 1
+    const ready = await requestWorker(worker, { type: 'encrypt-init', file, fileId, rootFileKey: key.buffer }, [key.buffer], signal)
+    if (ready.type !== 'ready' || !ready.header) throw new Error('File crypto worker did not initialize')
+    await onStart({ fileId, header: ready.header })
+    let final = false
+    while (!final) {
+      const response = await requestWorker(worker, { type: 'encrypt-next' }, [], signal)
+      if (response.type !== 'chunk') throw new Error('File crypto worker returned an invalid chunk')
+      final = response.final
+      await onChunk({
+        fileId,
+        index: response.index,
+        final,
+        ciphertext: new Uint8Array(response.ciphertext),
+        ...(response.digest ? { digest: new Uint8Array(response.digest) } : {}),
+      })
     }
   } finally {
-    sodium.memzero(key)
+    try { worker.postMessage({ type: 'destroy' }) } catch { /* The worker may already be terminated. */ }
+    worker.terminate()
   }
 }
 
 export class FileDecryptor {
-  private readonly fileId: string
-  private readonly key: Uint8Array
-  private readonly state: ReturnType<typeof sodium.crypto_secretstream_xchacha20poly1305_init_pull>
-  private readonly hash: ReturnType<typeof sodium.crypto_generichash_init>
-  private readonly expected: ExpectedFileMetadata
-  private readonly chunks: Uint8Array[] = []
-  private nextIndex = 0
-  private totalBytes = 0
+  private destroyed = false
+  private readonly controller = new AbortController()
 
-  private constructor(fileId: string, rootFileKey: Uint8Array, header: string, expected: ExpectedFileMetadata) {
-    this.fileId = fileId
-    this.key = deriveFileKey(rootFileKey, fileId)
-    this.state = sodium.crypto_secretstream_xchacha20poly1305_init_pull(base64UrlToBytes(header), this.key)
-    this.hash = sodium.crypto_generichash_init(null, 32)
-    this.expected = expected
-  }
+  private constructor(
+    private readonly worker: Worker,
+    private readonly fileId: string,
+  ) {}
 
   static async create(
     fileId: string,
@@ -125,65 +117,45 @@ export class FileDecryptor {
     header: string,
     expected: ExpectedFileMetadata,
   ): Promise<FileDecryptor> {
-    await sodium.ready
-    return new FileDecryptor(fileId, rootFileKey, header, expected)
+    const worker = createFileWorker()
+    const key = rootFileKey.slice()
+    try {
+      const ready = await requestWorker(worker, {
+        type: 'decrypt-init',
+        fileId,
+        rootFileKey: key.buffer,
+        header,
+        expected,
+      }, [key.buffer])
+      if (ready.type !== 'ready') throw new Error('File crypto worker did not initialize')
+      return new FileDecryptor(worker, fileId)
+    } catch (error) {
+      worker.terminate()
+      throw error
+    }
   }
 
-  push(frame: EncryptedFileChunk): Blob | null {
-    if (
-      frame.fileId !== this.fileId ||
-      frame.index !== this.nextIndex ||
-      frame.index >= this.expected.chunkCount
-    ) throw new Error('Unexpected encrypted file chunk')
-    const expectedFinal = frame.index === this.expected.chunkCount - 1
-    if (frame.final !== expectedFinal) throw new Error('Encrypted file final chunk is inconsistent with the offer')
-    const result = sodium.crypto_secretstream_xchacha20poly1305_pull(
-      this.state,
-      base64UrlToBytes(frame.ciphertext),
-      encoder.encode(`${this.fileId}|${frame.index}`),
-    )
-    if (!result) throw new Error('Encrypted file chunk failed authentication')
-    const expectedTag = frame.final
-      ? sodium.crypto_secretstream_xchacha20poly1305_TAG_FINAL
-      : sodium.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE
-    if (result.tag !== expectedTag) {
-      sodium.memzero(result.message)
-      throw new Error('Encrypted file stream tag is invalid')
-    }
-    const expectedChunkBytes = expectedFinal
-      ? this.expected.size - (this.expected.chunkCount - 1) * this.expected.chunkSize
-      : this.expected.chunkSize
-    if (result.message.length !== expectedChunkBytes) {
-      sodium.memzero(result.message)
-      throw new Error('Encrypted file chunk length is inconsistent with the offer')
-    }
-    this.totalBytes += result.message.length
-    if (this.totalBytes > this.expected.size) throw new Error('Encrypted file exceeds the offered size')
-    sodium.crypto_generichash_update(this.hash, result.message)
-    this.chunks.push(result.message)
-    this.nextIndex += 1
-    if (!frame.final) return null
-    const digest = sodium.crypto_generichash_final(this.hash, 32)
-    const expectedDigestBytes = base64UrlToBytes(this.expected.digest)
-    const verified = sodium.memcmp(digest, expectedDigestBytes)
-    sodium.memzero(digest)
-    sodium.memzero(expectedDigestBytes)
-    if (!verified) throw new Error('Encrypted file digest mismatch')
-    const blobParts: ArrayBuffer[] = []
-    for (const chunk of this.chunks) {
-      const copy = new Uint8Array(chunk.byteLength)
-      copy.set(chunk)
-      blobParts.push(copy.buffer)
-      sodium.memzero(chunk)
-    }
-    this.chunks.length = 0
-    sodium.memzero(this.key)
-    return new Blob(blobParts)
+  async push(frame: EncryptedFileChunk): Promise<Blob | null> {
+    if (this.destroyed || frame.fileId !== this.fileId) throw new Error('File decryptor is unavailable')
+    const ciphertext = frame.ciphertext.slice()
+    const digest = frame.digest?.slice()
+    const response = await requestWorker(this.worker, {
+      type: 'decrypt-push',
+      fileId: frame.fileId,
+      index: frame.index,
+      final: frame.final,
+      ciphertext: ciphertext.buffer,
+      ...(digest ? { digest: digest.buffer } : {}),
+    }, [ciphertext.buffer, ...(digest ? [digest.buffer] : [])], this.controller.signal)
+    if (response.type !== 'decrypted') throw new Error('File crypto worker returned an invalid response')
+    return response.blob ?? null
   }
 
   destroy(): void {
-    sodium.memzero(this.key)
-    for (const chunk of this.chunks) sodium.memzero(chunk)
-    this.chunks.length = 0
+    if (this.destroyed) return
+    this.destroyed = true
+    this.controller.abort()
+    try { this.worker.postMessage({ type: 'destroy' }) } catch { /* The worker may already be terminated. */ }
+    this.worker.terminate()
   }
 }
