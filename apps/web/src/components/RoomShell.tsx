@@ -351,9 +351,9 @@ export function RoomShell(props: RoomShellProps) {
                         setDeliveryMessageId(message.id)
                       }}
                     >
-                      <span>{t(preferences.locale, 'delivered')} {message.deliveryRecipients.filter((recipient) => recipient.deliveredAt !== undefined).length}</span>
-                      <span aria-hidden="true">·</span>
-                      <span>{t(preferences.locale, 'undelivered')} {message.deliveryRecipients.filter((recipient) => recipient.deliveredAt === undefined).length}</span>
+                      <span>{message.deliveryRecipients.filter((recipient) => recipient.deliveredAt !== undefined).length}</span>
+                      <span aria-hidden="true">/</span>
+                      <span>{message.deliveryRecipients.filter((recipient) => recipient.deliveredAt === undefined).length}</span>
                     </button>
                   ) : null}
                 </div>
