@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   FILE_CHUNK_SIZE_BYTES,
   MAX_ENCRYPTED_MESSAGE_BYTES,
+  MAX_DELIVERY_ACK_MESSAGE_IDS,
   MAX_FILE_SIZE_BYTES,
   MAX_ICE_CANDIDATE_LENGTH,
   MAX_LINK_LENGTH,
@@ -453,10 +454,19 @@ export const AttachmentStateSchema = z
   .strict();
 export type AttachmentState = z.infer<typeof AttachmentStateSchema>;
 
+export const MessageDeliveredSchema = z
+  .object({
+    type: z.literal("message-delivered"),
+    messageIds: z.array(MessageIdSchema).min(1).max(MAX_DELIVERY_ACK_MESSAGE_IDS),
+  })
+  .strict();
+export type MessageDelivered = z.infer<typeof MessageDeliveredSchema>;
+
 export const ChatPayloadSchema = z.discriminatedUnion("type", [
   RichTextMessageSchema,
   AttachmentOfferSchema,
   AttachmentStateSchema,
+  MessageDeliveredSchema,
 ]);
 export type ChatPayload = z.infer<typeof ChatPayloadSchema>;
 

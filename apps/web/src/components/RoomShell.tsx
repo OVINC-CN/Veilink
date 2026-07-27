@@ -75,11 +75,18 @@ export function RoomShell(props: RoomShellProps) {
   const [highlightedMessageId, setHighlightedMessageId] = useState<string>()
   const [pressingMessageId, setPressingMessageId] = useState<string>()
   const [messageMenu, setMessageMenu] = useState<MessageMenuState>()
+  const [deliveryMessageId, setDeliveryMessageId] = useState<string>()
   const [requestingNotifications, setRequestingNotifications] = useState(false)
   const lastMessage = messages.at(-1)
   const lastMessageId = lastMessage?.id
   const lastMessageSenderId = lastMessage?.senderId
   const messagesByReference = useMemo(() => new Map(messages.map((message) => [message.id, message])), [messages])
+  const currentMemberIds = useMemo(() => new Set(room.members.map((member) => member.id)), [room.members])
+  const deliveryMessage = deliveryMessageId
+    ? messages.find((message) => message.id === deliveryMessageId)
+    : undefined
+  const deliveredRecipients = deliveryMessage?.deliveryRecipients?.filter((recipient) => recipient.deliveredAt !== undefined) ?? []
+  const undeliveredRecipients = deliveryMessage?.deliveryRecipients?.filter((recipient) => recipient.deliveredAt === undefined) ?? []
 
   const clearLongPress = useCallback((): void => {
     if (longPress.current) window.clearTimeout(longPress.current.timer)
@@ -119,6 +126,21 @@ export function RoomShell(props: RoomShellProps) {
   useEffect(() => {
     if (messageMenu && !messages.some((message) => message.id === messageMenu.messageId)) closeMessageMenu()
   }, [closeMessageMenu, messageMenu, messages])
+
+  useEffect(() => {
+    if (deliveryMessageId && !messages.some((message) => message.id === deliveryMessageId)) {
+      setDeliveryMessageId(undefined)
+    }
+  }, [deliveryMessageId, messages])
+
+  useEffect(() => {
+    if (!deliveryMessageId) return
+    const escape = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setDeliveryMessageId(undefined)
+    }
+    document.addEventListener('keydown', escape)
+    return () => document.removeEventListener('keydown', escape)
+  }, [deliveryMessageId])
 
   useLayoutEffect(() => {
     if (!messageMenu) return
@@ -319,6 +341,21 @@ export function RoomShell(props: RoomShellProps) {
                     {links.map((href) => <LocalLinkCard href={href} key={href} />)}
                     {message.attachments.map((attachment) => <AttachmentPreview attachment={attachment} locale={preferences.locale} onPreviewOpen={closeMessageMenu} key={attachment.id} />)}
                   </div>
+                  {isSelf && message.deliveryRecipients && message.deliveryRecipients.length > 0 ? (
+                    <button
+                      className="message-delivery-status"
+                      type="button"
+                      aria-label={`${t(preferences.locale, 'deliveryStatus')}: ${t(preferences.locale, 'delivered')} ${message.deliveryRecipients.filter((recipient) => recipient.deliveredAt !== undefined).length}, ${t(preferences.locale, 'undelivered')} ${message.deliveryRecipients.filter((recipient) => recipient.deliveredAt === undefined).length}`}
+                      onClick={() => {
+                        closeMessageMenu()
+                        setDeliveryMessageId(message.id)
+                      }}
+                    >
+                      <span>{t(preferences.locale, 'delivered')} {message.deliveryRecipients.filter((recipient) => recipient.deliveredAt !== undefined).length}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{t(preferences.locale, 'undelivered')} {message.deliveryRecipients.filter((recipient) => recipient.deliveredAt === undefined).length}</span>
+                    </button>
+                  ) : null}
                 </div>
                 <div className="message-actions">
                   <button
@@ -382,6 +419,60 @@ export function RoomShell(props: RoomShellProps) {
             <ArrowBendUpLeft weight="bold" />
             <span>{t(preferences.locale, 'replyAction')}</span>
           </button>
+        </div>,
+        document.body,
+      ) : null}
+      {deliveryMessage ? createPortal(
+        <div
+          className="delivery-dialog-backdrop"
+          onPointerDown={(event) => {
+            if (event.target === event.currentTarget) setDeliveryMessageId(undefined)
+          }}
+        >
+          <section
+            className="delivery-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delivery-dialog-title"
+          >
+            <header>
+              <div>
+                <strong id="delivery-dialog-title">{t(preferences.locale, 'deliveryMembers')}</strong>
+                <small>{deliveryMessage.senderName}</small>
+              </div>
+              <button
+                type="button"
+                autoFocus
+                aria-label={preferences.locale === 'zh-CN' ? '关闭送达名单' : 'Close delivery list'}
+                onClick={() => setDeliveryMessageId(undefined)}
+              >
+                <X aria-hidden="true" />
+              </button>
+            </header>
+            {[
+              { key: 'delivered', label: t(preferences.locale, 'delivered'), recipients: deliveredRecipients },
+              { key: 'undelivered', label: t(preferences.locale, 'undelivered'), recipients: undeliveredRecipients },
+            ].map((group) => (
+              <div className="delivery-group" key={group.key}>
+                <h3>{group.label} <span>{group.recipients.length}</span></h3>
+                {group.recipients.length > 0 ? (
+                  <ul>
+                    {group.recipients.map((recipient) => (
+                      <li key={recipient.memberId}>
+                        <MemberAvatar seed={recipient.identityPublicKey} />
+                        <span className="member-copy">
+                          <strong>{recipient.nickname}</strong>
+                          {!currentMemberIds.has(recipient.memberId) ? <small>{t(preferences.locale, 'departed')}</small> : null}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>{group.key === 'delivered' ? t(preferences.locale, 'noDeliveredMembers') : t(preferences.locale, 'noUndeliveredMembers')}</p>
+                )}
+              </div>
+            ))}
+          </section>
         </div>,
         document.body,
       ) : null}

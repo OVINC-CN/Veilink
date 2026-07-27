@@ -46,8 +46,8 @@ service only coordinates admission, signalling, and temporary membership.
 - **Ephemeral rooms** — up to 8 members, automatic expiry within 24 hours, owner
   renewal and explicit room destruction.
 - **A complete chat experience** — rich text, links, quoted replies, `@mentions`,
-  private mention notifications, emoji, file transfer, and image/audio/video/PDF
-  previews.
+  private mention notifications, emoji, encrypted per-member delivery status,
+  file transfer, and image/audio/video/PDF previews.
 - **Refresh recovery** — encrypted tab-scoped checkpoints restore an active room
   after an ordinary refresh without creating durable chat history.
 - **Built for self-hosting** — a single Go service serves both the API and the
@@ -191,6 +191,12 @@ counters, and up to 100 text-only messages. File payloads are never persisted.
 Redis retains the member lease for `RECONNECT_GRACE_SECONDS`, and the resume
 token rotates after every successful restore. Explicit leave, room destruction,
 expired or rejected recovery, and validation failures erase the checkpoint.
+
+Delivery status is returned to the original sender over the end-to-end encrypted
+DataChannel after the receiving application successfully decrypts and validates
+the message. It confirms application-level delivery, not that a member has read
+the message. The signalling service, Redis, and TURN relay do not store or parse
+delivery lists.
 
 This is refresh recovery, not durable history. It does not protect against a
 compromised endpoint, frontend bundle, browser extension, or leaked invitation

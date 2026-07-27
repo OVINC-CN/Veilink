@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	Version           = 8
+	Version           = 9
 	MaxSignalBytes    = 128 * 1024
 	MaxSDPBytes       = 128 * 1024
 	MaxCandidateBytes = 4096

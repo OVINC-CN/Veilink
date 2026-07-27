@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 8 as const;
+export const PROTOCOL_VERSION = 9 as const;
 
 export const ROOM_ID_BYTES = 16;
 export const LINK_SECRET_BYTES = 32;
@@ -44,5 +44,6 @@ export const MAX_LINK_LENGTH = 2_048;
 export const MAX_SIGNAL_SDP_LENGTH = 128 * 1024;
 export const MAX_ICE_CANDIDATE_LENGTH = 4_096;
 export const MAX_ENCRYPTED_MESSAGE_BYTES = 64 * 1024;
+export const MAX_DELIVERY_ACK_MESSAGE_IDS = 100;
 
 export const PREFERENCES_STORAGE_KEY = "veilink.preferences.v1" as const;

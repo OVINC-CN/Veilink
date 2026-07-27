@@ -6,6 +6,7 @@ import {
   FILE_CHUNK_SIZE_BYTES,
   EncryptedChatFrameSchema,
   IdentityPublicKeySchema,
+  MAX_DELIVERY_ACK_MESSAGE_IDS,
   MemberIdSchema,
   NicknameSchema,
   PEER_CONNECTION_WARNING_MS,
@@ -58,7 +59,16 @@ import {
   saveInvitationSecret,
 } from './invitationRecovery'
 import { bytesToBase64Url, randomId } from './lib/encoding'
-import type { ActiveRoom, AttachmentRecipientView, AttachmentView, ChatMessage, Member, RichTextDocument } from './models'
+import type {
+  ActiveRoom,
+  AttachmentRecipientView,
+  AttachmentView,
+  ChatMessage,
+  Member,
+  MessageDeliveryRecipient,
+  PendingDeliveryAcknowledgement,
+  RichTextDocument,
+} from './models'
 import { documentMentionsMember, notifyMention } from './mentionNotifications'
 import { validateMedia } from './mediaValidation'
 import {
@@ -68,6 +78,7 @@ import {
   loadRecovery,
   restoreIdentity,
   restoreKeys,
+  restorePendingDeliveryAcknowledgements,
   restoreReplayCounters,
   saveRecovery,
 } from './recovery'
@@ -92,6 +103,7 @@ type Stage = 'create' | 'join' | 'created' | 'invite-recovering' | 'recovering' 
 
 const MAX_DATA_FRAME_BYTES = 128 * 1024
 const MAX_MESSAGES_IN_MEMORY = 500
+const MAX_PENDING_DELIVERY_ACKNOWLEDGEMENTS = 500
 const MAX_REPLAY_SESSIONS_PER_PEER = 4
 const MAX_SEEN_ATTACHMENTS_PER_PEER = 64
 const MAX_CONCURRENT_INCOMING_FILES = 4
@@ -131,6 +143,10 @@ interface SessionRuntime {
   peerDataQueues: Map<string, Promise<void>>
   peerConnectionTimers: Map<string, { warning?: number; timeout: number }>
   peerConnectionTimeoutMs: number
+  pendingDeliveryAcknowledgements: Map<string, PendingDeliveryAcknowledgement>
+  pendingOutgoingDeliveries: Map<string, PendingOutgoingDelivery>
+  deliveryAcknowledgementFlushRunning: boolean
+  deliveryAcknowledgementFlushTimer?: number
   initialPeerIds: Set<string>
   initialConnectionComplete: boolean
   initialConnectionGate?: InitialConnectionGate
@@ -148,6 +164,17 @@ interface SessionRuntime {
   resumeToken: string
   turnCredentialsExpiresAt: number
   turnRefreshTimer?: number
+}
+
+interface PendingOutgoingDelivery {
+  recipients: MessageDeliveryRecipient[]
+  deliveredAtByMember: Map<string, number>
+}
+
+interface SendPayloadResult {
+  messageId: string
+  sentAt: number
+  deliveryRecipients?: MessageDeliveryRecipient[]
 }
 
 type OutboundRecipientStatus = AttachmentRecipientView['status']
@@ -440,6 +467,10 @@ function acceptPeerFrame(runtime: SessionRuntime, sourceMemberId: string, bytes:
   return true
 }
 
+function deliveryAcknowledgementKey(senderId: string, messageId: string): string {
+  return `${senderId}:${messageId}`
+}
+
 export default function App() {
   const [preferences, setPreferences] = usePreferences()
   const preferencesRef = useRef(preferences)
@@ -721,6 +752,56 @@ export default function App() {
     if (persist) void persistRecoveryRef.current()
   }
 
+  const finalizeOutgoingDelivery = (
+    runtime: SessionRuntime,
+    result: SendPayloadResult,
+  ): MessageDeliveryRecipient[] | undefined => {
+    const pending = runtime.pendingOutgoingDeliveries.get(result.messageId)
+    runtime.pendingOutgoingDeliveries.delete(result.messageId)
+    const recipients = pending?.recipients ?? result.deliveryRecipients
+    if (!recipients) return undefined
+    return recipients.map((recipient) => {
+      const deliveredAt = pending?.deliveredAtByMember.get(recipient.memberId)
+      return deliveredAt === undefined ? recipient : { ...recipient, deliveredAt }
+    })
+  }
+
+  const recordDeliveryAcknowledgements = (
+    memberId: string,
+    messageIds: readonly string[],
+  ): void => {
+    const currentMemberId = roomRef.current?.memberId
+    if (!currentMemberId) return
+    const deliveredAt = Date.now()
+    let changed = false
+    const nextMessages = messagesRef.current.map((message) => {
+      if (
+        message.senderId !== currentMemberId ||
+        !messageIds.includes(message.messageId) ||
+        !message.deliveryRecipients?.some((recipient) => recipient.memberId === memberId && recipient.deliveredAt === undefined)
+      ) return message
+      changed = true
+      return {
+        ...message,
+        deliveryRecipients: message.deliveryRecipients.map((recipient) =>
+          recipient.memberId === memberId && recipient.deliveredAt === undefined
+            ? { ...recipient, deliveredAt }
+            : recipient),
+      }
+    })
+    if (changed) updateMessages(() => nextMessages, false)
+
+    for (const messageId of messageIds) {
+      const pending = runtimeRef.current?.pendingOutgoingDeliveries.get(messageId)
+      if (
+        !pending ||
+        pending.deliveredAtByMember.has(memberId) ||
+        !pending.recipients.some((recipient) => recipient.memberId === memberId)
+      ) continue
+      pending.deliveredAtByMember.set(memberId, deliveredAt)
+    }
+  }
+
   const updateAttachment = (attachmentId: string, patchValue: Partial<AttachmentView>): void => {
     updateMessages((current) => current.map((message) => ({
       ...message,
@@ -834,6 +915,7 @@ export default function App() {
       keys: runtime.keys,
       replayCounters: runtime.replayCounters,
       messages: messagesRef.current,
+      pendingDeliveryAcknowledgements: runtime.pendingDeliveryAcknowledgements.values(),
     }))
   }
   persistRecoveryRef.current = persistCurrentRecovery
@@ -993,6 +1075,7 @@ export default function App() {
       runtime.unsubscribe()
       clearPeerConnectionTimers(runtime)
       if (runtime.turnRefreshTimer !== undefined) window.clearTimeout(runtime.turnRefreshTimer)
+      if (runtime.deliveryAcknowledgementFlushTimer !== undefined) window.clearTimeout(runtime.deliveryAcknowledgementFlushTimer)
       runtime.mesh.destroy()
       cancelTransfers(runtime)
       if (sendLeave) runtime.signal.leave()
@@ -1014,6 +1097,8 @@ export default function App() {
       runtime.peerRateWindows.clear()
       runtime.peerViolationWindows.clear()
       runtime.peerDataQueues.clear()
+      runtime.pendingDeliveryAcknowledgements.clear()
+      runtime.pendingOutgoingDeliveries.clear()
       runtime.attachmentMetadata.clear()
       runtime.attachmentReservations.clear()
       runtime.incomingTransferTimers.clear()
@@ -1086,6 +1171,80 @@ export default function App() {
       })()
     }
     runtime.turnRefreshTimer = window.setTimeout(refresh, delay)
+  }
+
+  const scheduleDeliveryAcknowledgementFlush = (runtime: SessionRuntime): void => {
+    if (
+      runtimeRef.current !== runtime ||
+      runtime.deliveryAcknowledgementFlushRunning ||
+      runtime.deliveryAcknowledgementFlushTimer !== undefined ||
+      runtime.pendingDeliveryAcknowledgements.size === 0
+    ) return
+    runtime.deliveryAcknowledgementFlushTimer = window.setTimeout(() => {
+      runtime.deliveryAcknowledgementFlushTimer = undefined
+      void flushDeliveryAcknowledgements(runtime)
+    }, 0)
+  }
+
+  const enqueueDeliveryAcknowledgement = (
+    runtime: SessionRuntime,
+    senderId: string,
+    messageId: string,
+  ): void => {
+    const key = deliveryAcknowledgementKey(senderId, messageId)
+    if (!runtime.pendingDeliveryAcknowledgements.has(key)) {
+      if (runtime.pendingDeliveryAcknowledgements.size >= MAX_PENDING_DELIVERY_ACKNOWLEDGEMENTS) {
+        const oldest = runtime.pendingDeliveryAcknowledgements.keys().next().value
+        if (oldest !== undefined) runtime.pendingDeliveryAcknowledgements.delete(oldest)
+      }
+      runtime.pendingDeliveryAcknowledgements.set(key, { senderId, messageId })
+    }
+  }
+
+  const flushDeliveryAcknowledgements = async (runtime: SessionRuntime): Promise<void> => {
+    if (runtimeRef.current !== runtime || runtime.deliveryAcknowledgementFlushRunning) return
+    runtime.deliveryAcknowledgementFlushRunning = true
+    const attempted = new Set<string>()
+    try {
+      const connected = new Set(runtime.mesh.connectedMemberIds())
+      const grouped = new Map<string, PendingDeliveryAcknowledgement[]>()
+      for (const [key, acknowledgement] of runtime.pendingDeliveryAcknowledgements) {
+        if (!connected.has(acknowledgement.senderId)) continue
+        attempted.add(key)
+        const items = grouped.get(acknowledgement.senderId) ?? []
+        items.push(acknowledgement)
+        grouped.set(acknowledgement.senderId, items)
+      }
+      for (const [senderId, acknowledgements] of grouped) {
+        for (let index = 0; index < acknowledgements.length; index += MAX_DELIVERY_ACK_MESSAGE_IDS) {
+          const chunk = acknowledgements.slice(index, index + MAX_DELIVERY_ACK_MESSAGE_IDS)
+          try {
+            const payload = ChatPayloadSchema.parse({
+              type: 'message-delivered',
+              messageIds: chunk.map((acknowledgement) => acknowledgement.messageId),
+            })
+            await sendPayload(payload, [senderId])
+            for (const acknowledgement of chunk) {
+              runtime.pendingDeliveryAcknowledgements.delete(
+                deliveryAcknowledgementKey(acknowledgement.senderId, acknowledgement.messageId),
+              )
+            }
+            if (!await persistCurrentRecovery()) {
+              abortForRecoveryFailure()
+              return
+            }
+          } catch {
+            // Delivery confirmations are retried when the peer channel opens again.
+          }
+        }
+      }
+    } finally {
+      runtime.deliveryAcknowledgementFlushRunning = false
+      if (
+        runtimeRef.current === runtime &&
+        [...runtime.pendingDeliveryAcknowledgements.keys()].some((key) => !attempted.has(key))
+      ) scheduleDeliveryAcknowledgementFlush(runtime)
+    }
   }
 
   const processData = async (sourceMemberId: string, raw: string | ArrayBuffer): Promise<void> => {
@@ -1219,8 +1378,15 @@ export default function App() {
           abortForRecoveryFailure()
           return
         }
-        await processPayload(payload, sender, frame.sentAt, frame.messageId)
-        if (!await persistCurrentRecovery()) abortForRecoveryFailure()
+        const shouldAcknowledgeDelivery = await processPayload(payload, sender, frame.sentAt, frame.messageId)
+        if (shouldAcknowledgeDelivery) {
+          enqueueDeliveryAcknowledgement(runtime, sender.id, frame.messageId)
+        }
+        if (!await persistCurrentRecovery()) {
+          abortForRecoveryFailure()
+          return
+        }
+        if (shouldAcknowledgeDelivery) scheduleDeliveryAcknowledgementFlush(runtime)
       } catch {
         return
       }
@@ -1229,9 +1395,9 @@ export default function App() {
 
   }
 
-  const processPayload = async (payload: ChatPayload, sender: Member, sentAt: number, messageId: string): Promise<void> => {
+  const processPayload = async (payload: ChatPayload, sender: Member, sentAt: number, messageId: string): Promise<boolean> => {
     const runtime = runtimeRef.current
-    if (!runtime) return
+    if (!runtime) return false
     if (payload.type === 'rich-text') {
       const document = payload.document as RichTextDocument
       updateMessages((current) => [...current, {
@@ -1249,7 +1415,7 @@ export default function App() {
       if (currentMemberId && documentMentionsMember(document, currentMemberId)) {
         notifyMention(preferencesRef.current)
       }
-      return
+      return true
     }
     if (payload.type === 'attachment-offer') {
       const metadata = payload.attachment
@@ -1257,7 +1423,7 @@ export default function App() {
       if (
         runtime.seenAttachments.has(viewId) ||
         countKeysForPeer(runtime.seenAttachments, sender.id) >= MAX_SEEN_ATTACHMENTS_PER_PEER
-      ) return
+      ) return false
       runtime.seenAttachments.add(viewId)
       const maxBytes = preferencesRef.current.maxFileSizeMb * 1024 * 1024
       const retainedLimit = Math.min(MAX_RETAINED_ATTACHMENT_BYTES, maxBytes * 4)
@@ -1282,7 +1448,7 @@ export default function App() {
           if (runtimeRef.current !== runtime) {
             decryptor.destroy()
             releaseAttachment(runtime, viewId)
-            return
+            return false
           }
           runtime.decryptors.set(viewId, decryptor)
           runtime.attachmentMetadata.set(viewId, metadata)
@@ -1331,11 +1497,15 @@ export default function App() {
           updateAttachmentProgress(viewId, { status: 'cancelled', progress: 0 }, true)
         }
       }
-      return
+      return true
+    }
+    if (payload.type === 'message-delivered') {
+      recordDeliveryAcknowledgements(sender.id, payload.messageIds)
+      return false
     }
     const transfer = runtime.outboundTransfers.get(payload.attachmentId)
     const recipient = transfer?.recipients.get(sender.id)
-    if (!transfer || !recipient || payload.transferredBytes < recipient.transferredBytes || payload.transferredBytes > transfer.size) return
+    if (!transfer || !recipient || payload.transferredBytes < recipient.transferredBytes || payload.transferredBytes > transfer.size) return false
     const previousStatus = recipient.status
     const valid = payload.state === 'accepted'
       ? previousStatus === 'offered' && payload.transferredBytes === 0
@@ -1348,7 +1518,7 @@ export default function App() {
             : payload.state === 'failed' || payload.state === 'cancelled'
               ? !recipientTerminal(previousStatus)
               : false
-    if (!valid) return
+    if (!valid) return false
     const now = performance.now()
     if (payload.transferredBytes > recipient.transferredBytes && now > recipient.sampleAt) {
       const instant = ((payload.transferredBytes - recipient.sampleBytes) * 1_000) / (now - recipient.sampleAt)
@@ -1375,6 +1545,7 @@ export default function App() {
     }
     syncOutboundTransfer(transfer, recipientTerminal(recipient.status))
     settleOutboundTransfer(transfer)
+    return false
   }
 
   const setupRuntime = async (
@@ -1386,6 +1557,7 @@ export default function App() {
     pin: string | undefined,
     peerConnectionTimeoutMs: number,
     initialReplayCounters: ReadonlyMap<string, number> = new Map(),
+    initialPendingDeliveryAcknowledgements: readonly PendingDeliveryAcknowledgement[] = [],
     trackJoin = false,
   ): Promise<ActiveRoom> => {
     const turnCredentials = trackJoin
@@ -1419,7 +1591,10 @@ export default function App() {
         }
       },
       onChannelChange: (memberId, state) => {
-        if (state === 'open') clearPeerConnectionTimer(runtime, memberId)
+        if (state === 'open') {
+          clearPeerConnectionTimer(runtime, memberId)
+          scheduleDeliveryAcknowledgementFlush(runtime)
+        }
         if (state === 'closed') {
           failTransfersForMember(runtime, memberId)
           armPeerConnectionTimer(runtime, memberId)
@@ -1461,6 +1636,12 @@ export default function App() {
       peerDataQueues: new Map(),
       peerConnectionTimers: new Map(),
       peerConnectionTimeoutMs,
+      pendingDeliveryAcknowledgements: new Map(initialPendingDeliveryAcknowledgements.map((acknowledgement) => [
+        deliveryAcknowledgementKey(acknowledgement.senderId, acknowledgement.messageId),
+        acknowledgement,
+      ])),
+      pendingOutgoingDeliveries: new Map(),
+      deliveryAcknowledgementFlushRunning: false,
       initialPeerIds: new Set(initialRoom.members
         .map((member) => member.id)
         .filter((memberId) => memberId !== initialRoom.memberId)),
@@ -1511,6 +1692,7 @@ export default function App() {
       mesh.syncMembers(initialRoom.members)
       armRoomConnectionTimers(runtime, initialRoom.members)
     }
+    scheduleDeliveryAcknowledgementFlush(runtime)
     return initialRoom
   }
 
@@ -1551,7 +1733,18 @@ export default function App() {
       resumed = true
       if (cancelled) throw new Error('恢复已取消')
       setLinkSecret(bundle.linkSecret)
-      await setupRuntime(confirmation, signal, identity!, keys!, bundle.linkSecret, bundle.pin, publicConfig.peerConnectionTimeoutMs, restoreReplayCounters(bundle), true)
+      await setupRuntime(
+        confirmation,
+        signal,
+        identity!,
+        keys!,
+        bundle.linkSecret,
+        bundle.pin,
+        publicConfig.peerConnectionTimeoutMs,
+        restoreReplayCounters(bundle),
+        restorePendingDeliveryAcknowledgements(bundle),
+        true,
+      )
       signal = undefined
       identity = undefined
       keys = undefined
@@ -1630,6 +1823,11 @@ export default function App() {
       runtime.peerDataQueues.delete(frame.payload.memberId)
       for (const key of [...runtime.replayCounters.keys()]) {
         if (key.startsWith(`${frame.payload.memberId}:`)) runtime.replayCounters.delete(key)
+      }
+      for (const [key, acknowledgement] of runtime.pendingDeliveryAcknowledgements) {
+        if (acknowledgement.senderId === frame.payload.memberId) {
+          runtime.pendingDeliveryAcknowledgements.delete(key)
+        }
       }
       const activeAttachmentPrefix = `${frame.payload.memberId}:`
       for (const viewId of [...runtime.seenAttachments]) {
@@ -1792,7 +1990,7 @@ export default function App() {
         challenge: challenge.challenge,
       }))
       joined = true
-      await setupRuntime(confirmation, signal, identity, keys, secret, pin, publicConfig.peerConnectionTimeoutMs, new Map(), true)
+      await setupRuntime(confirmation, signal, identity, keys, secret, pin, publicConfig.peerConnectionTimeoutMs, new Map(), [], true)
       pendingJoinRef.current = undefined
       identity = undefined
       keys = undefined
@@ -1823,24 +2021,53 @@ export default function App() {
     }
   }
 
-  const sendPayload = async (payload: ChatPayload, targetMemberIds?: readonly string[]): Promise<string> => {
+  const sendPayload = async (payload: ChatPayload, targetMemberIds?: readonly string[]): Promise<SendPayloadResult> => {
     const runtime = runtimeRef.current
     const current = roomRef.current
     if (!runtime || !current) throw new Error('安全连接尚未就绪')
     const validated = ChatPayloadSchema.parse(payload)
     const frame = await encryptChatPayload(validated, current.memberId, runtime.identity, runtime.keys.messageKey)
+    const deliveryRecipients = validated.type === 'rich-text' || validated.type === 'attachment-offer'
+      ? current.members
+        .filter((member) => member.id !== current.memberId)
+        .map((member) => ({
+          memberId: member.id,
+          nickname: member.nickname,
+          identityPublicKey: member.identityPublicKey,
+        }))
+      : undefined
+    if (deliveryRecipients) {
+      if (runtime.pendingOutgoingDeliveries.size >= MAX_MESSAGES_IN_MEMORY) {
+        const oldest = runtime.pendingOutgoingDeliveries.keys().next().value
+        if (oldest !== undefined) runtime.pendingOutgoingDeliveries.delete(oldest)
+      }
+      runtime.pendingOutgoingDeliveries.set(frame.messageId, {
+        recipients: deliveryRecipients,
+        deliveredAtByMember: new Map(),
+      })
+    }
     if (!await persistCurrentRecovery()) {
+      runtime.pendingOutgoingDeliveries.delete(frame.messageId)
       abortForRecoveryFailure()
       throw new Error('无法安全保存发送状态')
     }
     const serialized = JSON.stringify(frame)
-    if (targetMemberIds) {
-      const sent = await runtime.mesh.sendMany(targetMemberIds, serialized)
-      if (sent !== targetMemberIds.length) throw new Error('部分成员的安全连接不可用')
-    } else {
-      await runtime.mesh.broadcast(serialized)
+    try {
+      if (targetMemberIds) {
+        const sent = await runtime.mesh.sendMany(targetMemberIds, serialized)
+        if (sent !== targetMemberIds.length) throw new Error('部分成员的安全连接不可用')
+      } else {
+        await runtime.mesh.broadcast(serialized)
+      }
+    } catch (caught) {
+      runtime.pendingOutgoingDeliveries.delete(frame.messageId)
+      throw caught
     }
-    return frame.messageId
+    return {
+      messageId: frame.messageId,
+      sentAt: frame.sentAt,
+      ...(deliveryRecipients ? { deliveryRecipients } : {}),
+    }
   }
 
   const sendDocument = async (document: RichTextDocument, replyTo?: ReplyReference): Promise<void> => {
@@ -1850,19 +2077,24 @@ export default function App() {
       setError(undefined)
       const payload = ChatPayloadSchema.parse({ type: 'rich-text', document, replyTo })
       if (payload.type !== 'rich-text') throw new Error('Invalid rich-text payload')
-      const messageId = await sendPayload(payload)
+      const result = await sendPayload(payload)
       const self = current.members.find((member) => member.id === current.memberId)
       if (!self) return
+      const activeRuntime = runtimeRef.current
+      const deliveryRecipients = activeRuntime
+        ? finalizeOutgoingDelivery(activeRuntime, result)
+        : result.deliveryRecipients
       updateMessages((items) => [...items, {
-        id: `${self.id}:${messageId}`,
-        messageId,
+        id: `${self.id}:${result.messageId}`,
+        messageId: result.messageId,
         senderId: self.id,
         senderName: self.nickname,
         senderIdentityPublicKey: self.identityPublicKey,
-        sentAt: Date.now(),
+        sentAt: result.sentAt,
         document: payload.document as RichTextDocument,
         attachments: [],
         replyTo: payload.replyTo,
+        deliveryRecipients,
       }])
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '消息发送失败')
@@ -1949,17 +2181,18 @@ export default function App() {
             const payload = ChatPayloadSchema.parse({ type: 'attachment-offer', attachment: metadata, replyTo })
             if (payload.type !== 'attachment-offer') throw new Error('Invalid attachment payload')
             const recipientIds = [...transfer.recipients.keys()]
-            const messageId = await sendPayload(payload, recipientIds)
+            const result = await sendPayload(payload, recipientIds)
+            const deliveryRecipients = finalizeOutgoingDelivery(runtime, result)
             if (controller.signal.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
             sentAny = true
             messageCreated = true
             updateMessages((items) => [...items, {
-              id: `${self.id}:${messageId}`,
-              messageId,
+              id: `${self.id}:${result.messageId}`,
+              messageId: result.messageId,
               senderId: self.id,
               senderName: self.nickname,
               senderIdentityPublicKey: self.identityPublicKey,
-              sentAt: Date.now(),
+              sentAt: result.sentAt,
               document: attachmentDocument(fileName),
               attachments: [{
                 id: viewId,
@@ -1973,6 +2206,7 @@ export default function App() {
                 recipients: recipientViews(transfer),
               }],
               replyTo: payload.replyTo,
+              deliveryRecipients,
             }], false)
             transfer.acceptanceTimer = window.setTimeout(() => {
               for (const recipient of transfer.recipients.values()) {

@@ -51,6 +51,18 @@ export interface AttachmentRecipientView {
   availableOutgoingBitrate?: number
 }
 
+export interface MessageDeliveryRecipient {
+  memberId: string
+  nickname: string
+  identityPublicKey: string
+  deliveredAt?: number
+}
+
+export interface PendingDeliveryAcknowledgement {
+  senderId: string
+  messageId: string
+}
+
 export interface ChatMessage {
   id: string
   messageId: string
@@ -61,6 +73,7 @@ export interface ChatMessage {
   document: RichTextDocument
   attachments: AttachmentView[]
   replyTo?: ReplyReference
+  deliveryRecipients?: MessageDeliveryRecipient[]
 }
 
 export interface ActiveRoom {

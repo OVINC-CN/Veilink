@@ -1,6 +1,7 @@
 import {
   IdentityPublicKeySchema,
   LinkSecretSchema,
+  MAX_ROOM_MEMBERS,
   MemberIdSchema,
   MessageIdSchema,
   NicknameSchema,
@@ -11,7 +12,7 @@ import {
   RoomIdSchema,
   SessionIdSchema,
 } from './protocol'
-import type { ChatMessage } from './models'
+import type { ChatMessage, MessageDeliveryRecipient, PendingDeliveryAcknowledgement } from './models'
 import type { DerivedKeys, SessionIdentity } from './crypto/types'
 import { base64UrlToBytes, bytesToBase64Url, randomBytes } from './lib/encoding'
 
@@ -21,6 +22,7 @@ const MAX_ENVELOPE_BYTES = 1_500_000
 const MAX_PLAINTEXT_BYTES = 1_000_000
 const MAX_RECOVERED_MESSAGES = 100
 const MAX_RECOVERED_MESSAGE_BYTES = 700_000
+const MAX_PENDING_DELIVERY_ACKNOWLEDGEMENTS = 500
 const encoder = new TextEncoder()
 const decoder = new TextDecoder(undefined, { fatal: true })
 
@@ -72,6 +74,7 @@ export interface RecoveryBundle {
   keys: SerializedKeys
   replayCounters: SerializedReplayCounter[]
   messages: ChatMessage[]
+  pendingDeliveryAcknowledgements?: PendingDeliveryAcknowledgement[]
 }
 
 let writeChain = Promise.resolve()
@@ -157,7 +160,7 @@ function parseEnvelope(raw: string): StoredEnvelope | undefined {
 }
 
 function parseBundle(value: unknown): RecoveryBundle | undefined {
-  if (!isRecord(value) || value.v !== 1 || !exactKeys(value, ['v', 'roomId', 'memberId', 'resumeToken', 'linkSecret', ...(value.pin === undefined ? [] : ['pin']), 'expiresAt', 'savedAt', 'identity', 'keys', 'replayCounters', 'messages'])) return undefined
+  if (!isRecord(value) || value.v !== 1 || !exactKeys(value, ['v', 'roomId', 'memberId', 'resumeToken', 'linkSecret', ...(value.pin === undefined ? [] : ['pin']), 'expiresAt', 'savedAt', 'identity', 'keys', 'replayCounters', 'messages', ...(value.pendingDeliveryAcknowledgements === undefined ? [] : ['pendingDeliveryAcknowledgements'])])) return undefined
   const identity = value.identity
   const keys = value.keys
   if (
@@ -182,11 +185,63 @@ function parseBundle(value: unknown): RecoveryBundle | undefined {
     !exactBytes(keys.fingerprintKey, 32) ||
     typeof keys.fingerprint !== 'string' || !/^(?:[A-F0-9]{4} ){7}[A-F0-9]{4}$/u.test(keys.fingerprint) ||
     !Array.isArray(value.replayCounters) || value.replayCounters.length > 32 || !parseReplayCounters(value.replayCounters) ||
-    !Array.isArray(value.messages) || value.messages.length > MAX_RECOVERED_MESSAGES
+    !Array.isArray(value.messages) || value.messages.length > MAX_RECOVERED_MESSAGES ||
+    (value.pendingDeliveryAcknowledgements !== undefined && (
+      !Array.isArray(value.pendingDeliveryAcknowledgements) ||
+      !parsePendingDeliveryAcknowledgements(value.pendingDeliveryAcknowledgements)
+    ))
   ) return undefined
   const messages = parseMessages(value.messages)
   if (!messages) return undefined
   return { ...(value as unknown as RecoveryBundle), messages }
+}
+
+function parsePendingDeliveryAcknowledgements(value: unknown[]): PendingDeliveryAcknowledgement[] | undefined {
+  if (value.length > MAX_PENDING_DELIVERY_ACKNOWLEDGEMENTS) return undefined
+  const acknowledgements: PendingDeliveryAcknowledgement[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (!isRecord(item) || !exactKeys(item, ['senderId', 'messageId'])) return undefined
+    const senderId = MemberIdSchema.safeParse(item.senderId)
+    const messageId = MessageIdSchema.safeParse(item.messageId)
+    if (!senderId.success || !messageId.success) return undefined
+    const key = `${senderId.data}:${messageId.data}`
+    if (seen.has(key)) return undefined
+    seen.add(key)
+    acknowledgements.push({ senderId: senderId.data, messageId: messageId.data })
+  }
+  return acknowledgements
+}
+
+function parseDeliveryRecipients(value: unknown): MessageDeliveryRecipient[] | undefined {
+  if (!Array.isArray(value) || value.length > MAX_ROOM_MEMBERS - 1) return undefined
+  const recipients: MessageDeliveryRecipient[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (!isRecord(item) || !exactKeys(item, ['memberId', 'nickname', 'identityPublicKey', ...(item.deliveredAt === undefined ? [] : ['deliveredAt'])])) return undefined
+    const memberId = MemberIdSchema.safeParse(item.memberId)
+    const nickname = NicknameSchema.safeParse(item.nickname)
+    const identityPublicKey = IdentityPublicKeySchema.safeParse(item.identityPublicKey)
+    if (
+      !memberId.success ||
+      !nickname.success ||
+      !identityPublicKey.success ||
+      (item.deliveredAt !== undefined && (
+        typeof item.deliveredAt !== 'number' ||
+        !Number.isSafeInteger(item.deliveredAt) ||
+        item.deliveredAt < 0
+      )) ||
+      seen.has(memberId.data)
+    ) return undefined
+    seen.add(memberId.data)
+    recipients.push({
+      memberId: memberId.data,
+      nickname: nickname.data,
+      identityPublicKey: identityPublicKey.data,
+      ...(typeof item.deliveredAt === 'number' ? { deliveredAt: item.deliveredAt } : {}),
+    })
+  }
+  return recipients
 }
 
 function parseReplayCounters(value: unknown[]): Map<string, number> | undefined {
@@ -207,16 +262,18 @@ function parseMessages(value: unknown[]): ChatMessage[] | undefined {
   const messages: ChatMessage[] = []
   const seen = new Set<string>()
   for (const item of value) {
-    if (!isRecord(item) || !exactKeys(item, ['id', 'messageId', 'senderId', 'senderName', 'senderIdentityPublicKey', 'sentAt', 'document', 'attachments', ...(item.replyTo === undefined ? [] : ['replyTo'])])) return undefined
+    if (!isRecord(item) || !exactKeys(item, ['id', 'messageId', 'senderId', 'senderName', 'senderIdentityPublicKey', 'sentAt', 'document', 'attachments', ...(item.replyTo === undefined ? [] : ['replyTo']), ...(item.deliveryRecipients === undefined ? [] : ['deliveryRecipients'])])) return undefined
     const messageId = MessageIdSchema.safeParse(item.messageId)
     const senderId = MemberIdSchema.safeParse(item.senderId)
     const senderName = NicknameSchema.safeParse(item.senderName)
     const senderKey = IdentityPublicKeySchema.safeParse(item.senderIdentityPublicKey)
     const document = RichTextDocumentSchema.safeParse(item.document)
     const replyTo = item.replyTo === undefined ? undefined : ReplyReferenceSchema.safeParse(item.replyTo)
+    const deliveryRecipients = item.deliveryRecipients === undefined ? undefined : parseDeliveryRecipients(item.deliveryRecipients)
     if (
       !messageId.success || !senderId.success || !senderName.success || !senderKey.success || !document.success ||
       (replyTo !== undefined && !replyTo.success) ||
+      (item.deliveryRecipients !== undefined && !deliveryRecipients) ||
       item.id !== `${senderId.data}:${messageId.data}` ||
       typeof item.sentAt !== 'number' || !Number.isSafeInteger(item.sentAt) || item.sentAt < 0 ||
       !Array.isArray(item.attachments) || item.attachments.length !== 0
@@ -233,6 +290,7 @@ function parseMessages(value: unknown[]): ChatMessage[] | undefined {
       document: document.data,
       attachments: [],
       ...(replyTo?.success ? { replyTo: replyTo.data } : {}),
+      ...(deliveryRecipients ? { deliveryRecipients } : {}),
     })
   }
   return messages
@@ -276,6 +334,7 @@ export function buildRecoveryBundle(input: {
   keys: DerivedKeys
   replayCounters: ReadonlyMap<string, number>
   messages: ChatMessage[]
+  pendingDeliveryAcknowledgements: Iterable<PendingDeliveryAcknowledgement>
 }): RecoveryBundle {
   return {
     v: 1,
@@ -304,6 +363,7 @@ export function buildRecoveryBundle(input: {
       return { senderId: key.slice(0, separator), sessionId: key.slice(separator + 1), counter }
     }),
     messages: recoverableMessages(input.messages),
+    pendingDeliveryAcknowledgements: [...input.pendingDeliveryAcknowledgements].slice(-MAX_PENDING_DELIVERY_ACKNOWLEDGEMENTS),
   }
 }
 
@@ -328,6 +388,10 @@ export function restoreKeys(bundle: RecoveryBundle): DerivedKeys {
 
 export function restoreReplayCounters(bundle: RecoveryBundle): Map<string, number> {
   return parseReplayCounters(bundle.replayCounters) ?? new Map()
+}
+
+export function restorePendingDeliveryAcknowledgements(bundle: RecoveryBundle): PendingDeliveryAcknowledgement[] {
+  return parsePendingDeliveryAcknowledgements(bundle.pendingDeliveryAcknowledgements ?? []) ?? []
 }
 
 export function saveRecovery(bundle: RecoveryBundle): Promise<boolean> {
