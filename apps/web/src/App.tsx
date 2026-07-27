@@ -1699,10 +1699,6 @@ export default function App() {
     }
   }
 
-  const rememberNickname = (nickname: string): void => {
-    if (preferences.rememberNickname) setPreferences({ ...preferences, nickname })
-  }
-
   const createRoom = async (rawNickname: string, creationPassword?: string): Promise<void> => {
     const entryIdentity = takeEntryIdentity()
     if (!entryIdentity) {
@@ -1741,7 +1737,6 @@ export default function App() {
       window.history.replaceState(window.history.state, '', `/room/${roomId}`)
       initialRoomId.current = roomId
       setLinkSecret(secret)
-      rememberNickname(nickname)
       setCreatedDetails({ pin, invitation })
       setStage('created')
       void persistCurrentRecovery()
@@ -1799,7 +1794,6 @@ export default function App() {
       joined = true
       await setupRuntime(confirmation, signal, identity, keys, secret, pin, publicConfig.peerConnectionTimeoutMs, new Map(), true)
       pendingJoinRef.current = undefined
-      rememberNickname(nickname)
       identity = undefined
       keys = undefined
       signal = undefined

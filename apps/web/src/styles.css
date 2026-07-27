@@ -433,6 +433,15 @@ button.message-reply-reference:active { transform: scale(.985); }
 .avatar-refresh:hover:not(:disabled) { border-color: var(--border-strong); background: var(--surface-hover); color: var(--text); }
 .avatar-refresh:disabled { opacity: .5; cursor: wait; }
 .avatar-refresh svg { width: 15px; height: 15px; }
+.nickname-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid var(--border); border-radius: 9px; background: color-mix(in srgb, var(--surface-solid) 66%, transparent); }
+.nickname-picker > div { display: flex; min-width: 0; flex-direction: column; }
+.nickname-picker strong { color: var(--text-secondary); font-size: 12px; font-weight: 650; }
+.nickname-picker small { color: var(--text-tertiary); font-size: 10px; }
+.nickname-picker code { min-width: 7.5ch; color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px; font-weight: 700; letter-spacing: .12em; text-align: center; user-select: text; }
+.nickname-refresh { display: inline-flex; min-height: 34px; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--text-secondary); font-size: 11px; font-weight: 570; cursor: pointer; transition: transform 100ms ease-out, background-color var(--ease-out), color var(--ease-out), border-color var(--ease-out); }
+.nickname-refresh:hover:not(:disabled) { border-color: var(--border-strong); background: var(--surface-hover); color: var(--text); }
+.nickname-refresh:disabled { opacity: .5; cursor: wait; }
+.nickname-refresh svg { width: 15px; height: 15px; }
 .pin-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .pin-fieldset legend { margin-bottom: 8px; color: var(--text-secondary); font-size: 12px; font-weight: 650; }
 .pin-inputs { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
@@ -574,6 +583,9 @@ button.message-reply-reference:active { transform: scale(.985); }
   .pin-inputs input { height: 48px; font-size: 18px; }
   .avatar-picker { grid-template-columns: auto minmax(0, 1fr); }
   .avatar-refresh { grid-column: 1 / -1; justify-content: center; }
+  .nickname-picker { grid-template-columns: minmax(0, 1fr) auto; }
+  .nickname-picker code { text-align: right; }
+  .nickname-refresh { grid-column: 1 / -1; justify-content: center; }
   .send-button { width: 42px; padding: 0; justify-content: center; }
   .send-button span { display: none; }
   .attachment-card { align-items: flex-start; flex-wrap: wrap; }

@@ -12,10 +12,8 @@ export interface Preferences {
   sendShortcut: SendShortcut
   showTimestamps: boolean
   density: Density
-  rememberNickname: boolean
   mentionNotifications: boolean
   notificationPromptDismissed: boolean
-  nickname?: string
 }
 
 function browserLocale(): Locale {
@@ -30,7 +28,6 @@ export function defaultPreferences(): Preferences {
     sendShortcut: 'enter',
     showTimestamps: true,
     density: 'comfortable',
-    rememberNickname: false,
     mentionNotifications: false,
     notificationPromptDismissed: false,
   }
@@ -57,7 +54,6 @@ export function sanitizePreferences(value: unknown): Preferences {
   const density = value.density === 'compact' || value.density === 'comfortable'
     ? value.density
     : defaults.density
-  const rememberNickname = value.rememberNickname === true
 
   return {
     locale,
@@ -66,19 +62,18 @@ export function sanitizePreferences(value: unknown): Preferences {
     sendShortcut,
     showTimestamps: value.showTimestamps !== false,
     density,
-    rememberNickname,
     mentionNotifications: value.mentionNotifications === true,
     notificationPromptDismissed: value.notificationPromptDismissed === true,
-    ...(rememberNickname && typeof value.nickname === 'string' && value.nickname.length <= 64
-      ? { nickname: value.nickname }
-      : {}),
   }
 }
 
 export function loadPreferences(): Preferences {
   try {
     const serialized = localStorage.getItem(PREFERENCES_KEY)
-    return serialized ? sanitizePreferences(JSON.parse(serialized) as unknown) : defaultPreferences()
+    if (!serialized) return defaultPreferences()
+    const sanitized = sanitizePreferences(JSON.parse(serialized) as unknown)
+    localStorage.setItem(PREFERENCES_KEY, JSON.stringify(sanitized))
+    return sanitized
   } catch {
     return defaultPreferences()
   }

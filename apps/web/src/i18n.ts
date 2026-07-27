@@ -2,8 +2,6 @@ import type { Locale } from './preferences'
 
 const messages = {
   'zh-CN': {
-    nickname: '昵称',
-    nicknamePlaceholder: '输入昵称',
     direct: 'Cloudflare TURN 中继',
     create: '创建',
     creationPassword: '会话创建密码',
@@ -27,6 +25,9 @@ const messages = {
     avatarEphemeral: '仅本次有效',
     changeAvatar: '换一个',
     avatarGenerating: '生成中…',
+    randomUsername: '随机用户名',
+    usernameEphemeral: '仅本次会话有效',
+    changeUsername: '换一个用户名',
     leave: '退出',
     destroy: '销毁',
     copyLink: '复制邀请链接',
@@ -60,8 +61,6 @@ const messages = {
     downloadFile: '下载文件',
   },
   'en-US': {
-    nickname: 'Nickname',
-    nicknamePlaceholder: 'Enter a nickname',
     direct: 'Cloudflare TURN relay',
     create: 'Create',
     creationPassword: 'Room creation password',
@@ -85,6 +84,9 @@ const messages = {
     avatarEphemeral: 'For this visit only',
     changeAvatar: 'Shuffle',
     avatarGenerating: 'Generating…',
+    randomUsername: 'Random username',
+    usernameEphemeral: 'For this session only',
+    changeUsername: 'Shuffle username',
     leave: 'Leave',
     destroy: 'Destroy',
     copyLink: 'Copy invitation link',

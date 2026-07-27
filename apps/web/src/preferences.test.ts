@@ -42,28 +42,28 @@ describe('preference persistence boundary', () => {
       sendShortcut: 'mod-enter',
       showTimestamps: false,
       density: 'compact',
-      rememberNickname: true,
       mentionNotifications: false,
       notificationPromptDismissed: false,
-      nickname: 'Mira',
     })
     expect(persisted).toEqual(saved)
     expect(persisted).not.toHaveProperty('defaultRoomMode')
     expect(Object.keys(localStorage)).toEqual([PREFERENCES_KEY])
   })
 
-  it('removes a remembered nickname as soon as remembering is disabled', () => {
-    const remembered = savePreferences({
+  it('removes a legacy remembered nickname while preserving other preferences', () => {
+    localStorage.setItem(PREFERENCES_KEY, JSON.stringify({
       ...defaultPreferences(),
+      theme: 'dark',
       rememberNickname: true,
       nickname: 'River',
-    })
-    expect(remembered.nickname).toBe('River')
-
-    const forgotten = savePreferences({ ...remembered, rememberNickname: false })
+    }))
+    const loaded = loadPreferences()
     const persisted = JSON.parse(localStorage.getItem(PREFERENCES_KEY) ?? '{}') as Record<string, unknown>
 
-    expect(forgotten).not.toHaveProperty('nickname')
+    expect(loaded.theme).toBe('dark')
+    expect(loaded).not.toHaveProperty('rememberNickname')
+    expect(loaded).not.toHaveProperty('nickname')
+    expect(persisted).not.toHaveProperty('rememberNickname')
     expect(persisted).not.toHaveProperty('nickname')
   })
 

@@ -10,6 +10,8 @@ const encoder = new TextEncoder();
 const FORBIDDEN_CONTROLS = /[\p{Cc}\p{Cs}\p{Zl}\p{Zp}]/u;
 const BIDI_CONTROLS = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
 const PATH_SEPARATORS = /[\\/]/u;
+const RANDOM_NICKNAME_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const RANDOM_NICKNAME_LENGTH = 6;
 
 export class DisplayNameValidationError extends TypeError {
   public constructor(message: string) {
@@ -63,6 +65,14 @@ export const NicknameSchema = z.string().transform((value, context) => {
   }
 });
 export type Nickname = z.infer<typeof NicknameSchema>;
+
+export function generateRandomNickname(): Nickname {
+  const random = crypto.getRandomValues(new Uint8Array(RANDOM_NICKNAME_LENGTH));
+  const nickname = [...random]
+    .map((value) => RANDOM_NICKNAME_ALPHABET[value & 0x1f])
+    .join("");
+  return NicknameSchema.parse(nickname);
+}
 
 export function normalizeFileName(value: string): string {
   const normalized = normalizeDisplayText(value);

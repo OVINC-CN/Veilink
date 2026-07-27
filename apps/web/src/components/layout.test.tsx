@@ -2,11 +2,16 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { ActiveRoom } from '../models'
 import { defaultPreferences } from '../preferences'
+import { generateRandomNickname } from '../protocol'
 import { CreateRoomView } from './CreateRoomView'
 import { EntryShell } from './EntryShell'
 import { RoomShell } from './RoomShell'
 
 vi.mock('./PdfPreview', () => ({ PdfPreview: () => null }))
+vi.mock('../protocol', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../protocol')>(),
+  generateRandomNickname: vi.fn(),
+}))
 
 beforeAll(() => {
   Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
@@ -17,6 +22,9 @@ beforeAll(() => {
 
 describe('minimal entry experience', () => {
   it('exposes one main region and labelled creation controls', () => {
+    vi.mocked(generateRandomNickname)
+      .mockReturnValueOnce('ABC234')
+      .mockReturnValue('DEF567')
     const preferences = { ...defaultPreferences(), locale: 'zh-CN' as const }
     const onCreate = vi.fn()
     const { container } = render(
@@ -28,31 +36,34 @@ describe('minimal entry experience', () => {
     expect(screen.getByRole('main')).toBeInTheDocument()
     expect(screen.queryByRole('heading')).not.toBeInTheDocument()
     expect(screen.getByText('随机头像')).toBeInTheDocument()
-    expect(screen.getByRole('textbox', { name: '昵称' })).toHaveAttribute('autocomplete', 'off')
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('随机用户名')).toHaveTextContent('ABC234')
     expect(screen.getByRole('button', { name: '切换语言' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '切换主题' })).toBeInTheDocument()
     expect(container.querySelectorAll('main')).toHaveLength(1)
     expect(container.querySelector('aside')).toBeNull()
 
-    fireEvent.change(screen.getByRole('textbox', { name: '昵称' }), { target: { value: 'Mira' } })
+    fireEvent.click(screen.getByRole('button', { name: '换一个用户名' }))
+    expect(screen.getByLabelText('随机用户名')).toHaveTextContent('DEF567')
     fireEvent.click(screen.getByRole('button', { name: '创建' }))
-    expect(onCreate).toHaveBeenCalledWith('Mira', undefined)
+    expect(onCreate).toHaveBeenCalledWith('DEF567', undefined)
     expect(screen.queryByText('P2P 直连')).not.toBeInTheDocument()
   })
 
   it('requires and submits the deployment creation password when configured', () => {
+    vi.mocked(generateRandomNickname).mockReturnValue('ABC234')
     const preferences = { ...defaultPreferences(), locale: 'zh-CN' as const }
     const onCreate = vi.fn()
     render(
       <CreateRoomView preferences={preferences} busy={false} avatarSeed="avatar-seed" avatarBusy={false} creationPasswordRequired onRegenerateAvatar={vi.fn()} onCreate={onCreate} />,
     )
-    fireEvent.change(screen.getByRole('textbox', { name: '昵称' }), { target: { value: 'Mira' } })
     const password = screen.getByLabelText('会话创建密码')
     expect(password).toBeRequired()
+    expect(password).toHaveFocus()
     expect(screen.getByRole('button', { name: '创建' })).toBeDisabled()
     fireEvent.change(password, { target: { value: 'deployment-secret' } })
     fireEvent.click(screen.getByRole('button', { name: '创建' }))
-    expect(onCreate).toHaveBeenCalledWith('Mira', 'deployment-secret')
+    expect(onCreate).toHaveBeenCalledWith('ABC234', 'deployment-secret')
   })
 })
 

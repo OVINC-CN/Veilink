@@ -1,6 +1,5 @@
 import {
   Bell,
-  BookmarkSimple,
   CaretDown,
   Check,
   Clock,
@@ -64,7 +63,6 @@ export function RoomTopBar({
   const [remaining, setRemaining] = useState(() => formatRemaining(room.expiresAt))
   const root = useRef<HTMLElement>(null)
   const renewalResetTimer = useRef<number | undefined>(undefined)
-  const self = room.members.find((member) => member.id === room.memberId)
   const zh = preferences.locale === 'zh-CN'
   const notificationAvailability = mentionNotificationAvailability()
   const roomLabel = room.fingerprint.replaceAll(' ', '').slice(-4).toUpperCase()
@@ -203,11 +201,6 @@ export function RoomTopBar({
                   <span className="setting-icon"><Bell /></span>
                   <span className="setting-copy"><strong>{t(preferences.locale, 'mentionNotifications')}</strong>{notificationAvailability === 'denied' ? <small>{t(preferences.locale, 'notificationBlocked')}</small> : null}{notificationAvailability === 'unsupported' ? <small>{t(preferences.locale, 'notificationUnsupported')}</small> : null}</span>
                   <input type="checkbox" checked={preferences.mentionNotifications && notificationAvailability === 'granted'} disabled={requestingNotifications || notificationAvailability === 'denied' || notificationAvailability === 'unsupported'} onChange={(event) => void changeMentionNotifications(event.target.checked)} />
-                </label>
-                <label className="setting-row setting-toggle">
-                  <span className="setting-icon"><BookmarkSimple /></span>
-                  <span className="setting-copy"><strong>{zh ? '记住昵称' : 'Remember nickname'}</strong></span>
-                  <input type="checkbox" checked={preferences.rememberNickname} onChange={(event) => onPreferences({ ...preferences, rememberNickname: event.target.checked, ...(event.target.checked && self ? { nickname: self.nickname } : { nickname: undefined }) })} />
                 </label>
               </section>
             ) : null}

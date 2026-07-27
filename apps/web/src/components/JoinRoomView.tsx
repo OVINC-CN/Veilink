@@ -4,7 +4,9 @@ import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent, type 
 import { t } from '../i18n'
 import type { JoinAttempt, JoinFailure, JoinPeerDiagnostic, JoinStep, JoinStepId } from '../joinDiagnostics'
 import type { Preferences } from '../preferences'
+import { generateRandomNickname } from '../protocol'
 import { MemberAvatar } from './MemberAvatar'
+import { RandomNicknamePicker } from './RandomNicknamePicker'
 
 interface JoinRoomViewProps {
   preferences: Preferences
@@ -253,7 +255,7 @@ function JoinProgress({ attempt, locale }: { attempt: JoinAttempt; locale: 'zh-C
 }
 
 export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, avatarBusy, restoring = false, error, joinAttempt, initialNickname, initialPin, onRegenerateAvatar, onJoin, onEnter }: JoinRoomViewProps) {
-  const [nickname, setNickname] = useState(initialNickname ?? (preferences.rememberNickname ? preferences.nickname ?? '' : ''))
+  const [nickname, setNickname] = useState(() => initialNickname ?? generateRandomNickname())
   const [digits, setDigits] = useState<string[]>(() => Array.from({ length: 6 }, (_, index) => initialPin?.[index] ?? ''))
   const inputs = useRef<Array<HTMLInputElement | null>>([])
   const resolvedNickname = initialNickname ?? nickname
@@ -269,7 +271,7 @@ export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, ava
       onEnter()
       return
     }
-    if (nickname.trim() && /^\d{6}$/u.test(pin) && hasLinkSecret) void onJoin(nickname, pin)
+    if (/^\d{6}$/u.test(pin) && hasLinkSecret) void onJoin(resolvedNickname, pin)
   }
   const setDigit = (index: number, rawValue: string): void => {
     const values = rawValue.replace(/\D/gu, '')
@@ -324,7 +326,7 @@ export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, ava
           <div><strong>{t(preferences.locale, 'randomAvatar')}</strong><small>{t(preferences.locale, 'avatarEphemeral')}</small></div>
           <button type="button" className="avatar-refresh" disabled={locked || avatarBusy} onClick={() => void onRegenerateAvatar()}><ArrowsClockwise />{avatarBusy ? t(preferences.locale, 'avatarGenerating') : t(preferences.locale, 'changeAvatar')}</button>
         </div>
-        <label>{t(preferences.locale, 'nickname')}<input autoFocus autoComplete="off" autoCapitalize="words" spellCheck="false" maxLength={64} type="text" value={resolvedNickname} placeholder={t(preferences.locale, 'nicknamePlaceholder')} disabled={locked} onChange={(event) => setNickname(event.target.value)} required /></label>
+        <RandomNicknamePicker preferences={preferences} nickname={resolvedNickname} disabled={locked || initialNickname !== undefined} onRegenerate={() => setNickname(generateRandomNickname())} />
         <fieldset className="pin-fieldset" disabled={locked}>
           <legend>{t(preferences.locale, 'pin')}</legend>
           <div className="pin-inputs">
@@ -333,6 +335,7 @@ export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, ava
                 key={index}
                 ref={(element) => { inputs.current[index] = element }}
                 aria-label={preferences.locale === 'zh-CN' ? `PIN 第 ${index + 1} 位` : `${t(preferences.locale, 'pinDigit')} ${index + 1}`}
+                autoFocus={index === 0}
                 autoComplete="off"
                 data-1p-ignore="true"
                 enterKeyHint={index === 5 ? 'done' : 'next'}
@@ -351,7 +354,7 @@ export function JoinRoomView({ preferences, hasLinkSecret, busy, avatarSeed, ava
         </fieldset>
         {joinAttempt ? <JoinProgress attempt={joinAttempt} locale={preferences.locale} /> : null}
         {error && !joinAttempt?.failure ? <div className="form-error" role="alert">{error}</div> : null}
-        <button className="primary-button" type="submit" disabled={!ready && (busy || avatarBusy || !avatarSeed || !hasLinkSecret || !resolvedNickname.trim() || !/^\d{6}$/u.test(pin))}>
+        <button className="primary-button" type="submit" disabled={!ready && (busy || avatarBusy || !avatarSeed || !hasLinkSecret || !/^\d{6}$/u.test(pin))}>
           {ready ? <ArrowRight weight="bold" /> : <Key weight="fill" />}
           {ready ? t(preferences.locale, 'enter') : busy ? t(preferences.locale, 'connecting') : joinAttempt?.failure ? (preferences.locale === 'zh-CN' ? '重试加入' : 'Retry join') : t(preferences.locale, 'join')}
         </button>

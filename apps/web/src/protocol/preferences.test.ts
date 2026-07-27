@@ -41,22 +41,20 @@ describe("privacy-preserving preferences", () => {
     sendShortcut: "enter" as const,
     showTimestamps: true,
     density: "comfortable" as const,
-    rememberNickname: false,
   };
 
   it("uses the versioned, single storage key", () => {
     expect(PREFERENCES_STORAGE_KEY).toBe("veilink.preferences.v1");
   });
 
-  it("removes nickname when remembering is disabled", () => {
-    const parsed = ClientPreferencesSchema.parse({ ...base, nickname: "Alice" });
-    expect(parsed).not.toHaveProperty("nickname");
-    expect(serializePreferences({ ...base, nickname: "Alice" })).not.toContain("Alice");
+  it("rejects fixed nickname fields in new preferences", () => {
+    expect(ClientPreferencesSchema.safeParse({ ...base, nickname: "Alice" }).success).toBe(false);
+    expect(() => serializePreferences({ ...base, nickname: "Alice" })).toThrow();
   });
 
-  it("keeps a normalized nickname only after opt-in", () => {
-    const parsed = ClientPreferencesSchema.parse({ ...base, rememberNickname: true, nickname: " Café  " });
-    expect(parsed.nickname).toBe("Café");
+  it("removes legacy nickname fields while preserving other preferences", () => {
+    const stored = JSON.stringify({ ...base, theme: "dark", rememberNickname: true, nickname: "Café" });
+    expect(parseStoredPreferences(stored)).toEqual({ ...base, theme: "dark" });
   });
 
   it("drops the legacy room mode while preserving other preferences", () => {

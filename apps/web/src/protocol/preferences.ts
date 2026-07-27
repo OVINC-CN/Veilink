@@ -6,7 +6,6 @@ import {
   MIN_MAX_FILE_SIZE_MB,
   PREFERENCES_STORAGE_KEY,
 } from "./constants.js";
-import { NicknameSchema } from "./nickname.js";
 
 export { PREFERENCES_STORAGE_KEY };
 
@@ -23,8 +22,6 @@ export interface ClientPreferences {
   sendShortcut: z.infer<typeof SendShortcutSchema>;
   showTimestamps: boolean;
   density: z.infer<typeof DensitySchema>;
-  rememberNickname: boolean;
-  nickname?: string;
 }
 
 const ClientPreferencesObjectSchema = z
@@ -36,20 +33,10 @@ const ClientPreferencesObjectSchema = z
     sendShortcut: SendShortcutSchema,
     showTimestamps: z.boolean(),
     density: DensitySchema,
-    rememberNickname: z.boolean(),
-    nickname: NicknameSchema.optional(),
   })
   .strict();
 
-export const ClientPreferencesSchema = ClientPreferencesObjectSchema.transform((preferences): ClientPreferences => {
-  if (!preferences.rememberNickname) {
-    const sanitized: ClientPreferences = { ...preferences };
-    delete sanitized.nickname;
-    return sanitized;
-  }
-
-  return preferences;
-});
+export const ClientPreferencesSchema = ClientPreferencesObjectSchema;
 
 export const DEFAULT_CLIENT_PREFERENCES: ClientPreferences = Object.freeze({
   v: 1,
@@ -59,7 +46,6 @@ export const DEFAULT_CLIENT_PREFERENCES: ClientPreferences = Object.freeze({
   sendShortcut: "enter",
   showTimestamps: true,
   density: "comfortable",
-  rememberNickname: false,
 });
 
 export function parseStoredPreferences(serialized: string | null): ClientPreferences {
@@ -71,6 +57,8 @@ export function parseStoredPreferences(serialized: string | null): ClientPrefere
     const parsed: unknown = JSON.parse(serialized);
     if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
       delete (parsed as Record<string, unknown>).defaultRoomMode;
+      delete (parsed as Record<string, unknown>).rememberNickname;
+      delete (parsed as Record<string, unknown>).nickname;
     }
     const result = ClientPreferencesSchema.safeParse(parsed);
     return result.success ? result.data : { ...DEFAULT_CLIENT_PREFERENCES };
