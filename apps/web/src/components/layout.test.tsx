@@ -71,11 +71,11 @@ describe('room workspace layout', () => {
   it('keeps member navigation focused and shows room timing in the top bar', () => {
     const preferences = { ...defaultPreferences(), locale: 'zh-CN' as const }
     const room: ActiveRoom = {
-      roomId: 'room-id',
+      roomId: 'AAAAAAAAAAAAAAAAAAAAAA',
       memberId: 'member-owner',
       ownerId: 'member-owner',
       expiresAt: Date.now() + 60_000,
-      linkSecret: 'link-secret',
+      linkSecret: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       fingerprint: 'ABCD EFGH IJKL MNOP',
       keys: {
         admissionKey: new Uint8Array(32),
