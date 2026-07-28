@@ -54,6 +54,6 @@ export function generatePin(): Pin {
   return PinSchema.parse(String(value % PIN_RANGE).padStart(PIN_LENGTH, "0"));
 }
 
-export function buildInvitePath(roomId: RoomId, linkSecret: LinkSecret): string {
-  return `/room/${RoomIdSchema.parse(roomId)}#${LinkSecretSchema.parse(linkSecret)}`;
+export function buildInvitePath(roomId: string, linkSecret: string): string {
+  return `/room/${RoomIdSchema.parse(roomId)}?key=${LinkSecretSchema.parse(linkSecret)}`;
 }

@@ -22,6 +22,7 @@ import { t } from '../i18n'
 import { mentionNotificationAvailability, requestMentionNotificationPermission } from '../mentionNotifications'
 import type { ActiveRoom } from '../models'
 import type { Preferences } from '../preferences'
+import { buildInvitePath } from '../protocol'
 import { Brand } from './Brand'
 import { DestroyRoomDialog, LeaveRoomDialog, RoomMemberList } from './RoomSidePanel'
 
@@ -67,7 +68,7 @@ export function RoomTopBar({
   const notificationAvailability = mentionNotificationAvailability()
   const roomLabel = room.fingerprint.replaceAll(' ', '').slice(-4).toUpperCase()
   const isOwner = room.ownerId === room.memberId
-  const invitation = `${window.location.origin}/room/${room.roomId}#${room.linkSecret}`
+  const invitation = `${window.location.origin}${buildInvitePath(room.roomId, room.linkSecret)}`
   const pin = room.pin
 
   useEffect(() => {

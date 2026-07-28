@@ -66,7 +66,7 @@ function removeBootstrapFallback(): void {
     delete current[BOOTSTRAP_HISTORY_KEY]
     window.history.replaceState(current, '')
   } catch {
-    // The fragment bootstrap fallback remains scoped to this history entry.
+    // The invitation bootstrap fallback remains scoped to this history entry.
   }
 }
 

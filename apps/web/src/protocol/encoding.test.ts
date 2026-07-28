@@ -36,13 +36,13 @@ describe("base64url helpers", () => {
 });
 
 describe("room identifiers", () => {
-  it("generates correctly sized room secrets and a fragment-only invite secret", () => {
+  it("generates correctly sized room secrets and a query-parameter invite secret", () => {
     const roomId = generateRoomId();
     const linkSecret = generateLinkSecret();
 
     expect(base64UrlDecode(roomId)).toHaveLength(ROOM_ID_BYTES);
     expect(base64UrlDecode(linkSecret)).toHaveLength(LINK_SECRET_BYTES);
-    expect(buildInvitePath(roomId, linkSecret)).toBe(`/room/${roomId}#${linkSecret}`);
+    expect(buildInvitePath(roomId, linkSecret)).toBe(`/room/${roomId}?key=${linkSecret}`);
   });
 
   it("generates six decimal digits including zero padding", () => {

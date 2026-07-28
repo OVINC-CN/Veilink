@@ -8,9 +8,16 @@
   }
 
   const bootstrapHistoryKey = '__veilinkBootstrapInvite'
+  const inviteQueryKey = 'key'
   const roomMatch = /^\/room\/([A-Za-z0-9_-]{22})\/?$/.exec(window.location.pathname)
   const roomId = roomMatch?.[1]
-  const candidate = window.location.hash.slice(1)
+  const search = new URLSearchParams(window.location.search)
+  const queryCandidates = search.getAll(inviteQueryKey)
+  const queryCandidate = queryCandidates.length === 1 ? queryCandidates[0] : undefined
+  const legacyFragmentCandidate = window.location.hash.slice(1)
+  const candidate = /^[A-Za-z0-9_-]{43}$/.test(queryCandidate ?? '')
+    ? queryCandidate
+    : legacyFragmentCandidate
   const state = window.history.state && typeof window.history.state === 'object' && !Array.isArray(window.history.state)
     ? { ...window.history.state }
     : {}
@@ -38,11 +45,13 @@
     delete state[bootstrapHistoryKey]
   }
 
-  if (window.location.hash) {
+  if (search.has(inviteQueryKey) || window.location.hash) {
+    search.delete(inviteQueryKey)
+    const sanitizedSearch = search.toString()
     window.history.replaceState(
       state,
       '',
-      `${window.location.pathname}${window.location.search}`,
+      `${window.location.pathname}${sanitizedSearch ? `?${sanitizedSearch}` : ''}`,
     )
   }
 })()
