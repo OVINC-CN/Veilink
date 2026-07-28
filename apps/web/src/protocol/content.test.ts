@@ -107,3 +107,28 @@ describe("rich-text validation", () => {
     expect(validateRichTextDocument(tooDeep).success).toBe(false);
   });
 });
+
+describe("attachment transfer control", () => {
+  it("accepts structured failure and cancellation reasons", () => {
+    expect(ChatPayloadSchema.safeParse({
+      type: "attachment-state",
+      attachmentId,
+      state: "failed",
+      transferredBytes: 1024,
+      failureCode: "recipient-too-slow",
+    }).success).toBe(true);
+    expect(ChatPayloadSchema.safeParse({
+      type: "attachment-cancel",
+      attachmentId,
+      reason: "receiver-overloaded",
+    }).success).toBe(true);
+  });
+
+  it("rejects unknown attachment cancellation reasons", () => {
+    expect(ChatPayloadSchema.safeParse({
+      type: "attachment-cancel",
+      attachmentId,
+      reason: "arbitrary-peer-message",
+    }).success).toBe(false);
+  });
+});

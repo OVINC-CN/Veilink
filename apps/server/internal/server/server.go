@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -136,9 +137,7 @@ func (s *Server) Close(ctx context.Context) error {
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		response.Header().Set("Cache-Control", "no-store, max-age=0")
-		response.Header().Set("Pragma", "no-cache")
-		response.Header().Set("Expires", "0")
+		setNoStore(response.Header())
 		response.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; child-src 'none'; connect-src 'self'; font-src 'self'; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' data: blob:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; script-src-attr 'none'; style-src 'self'; style-src-attr 'unsafe-inline'; style-src-elem 'self'; worker-src 'self' blob:")
 		response.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		response.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
@@ -151,6 +150,18 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		response.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
 		next.ServeHTTP(response, request)
 	})
+}
+
+func setNoStore(header http.Header) {
+	header.Set("Cache-Control", "no-store, max-age=0")
+	header.Set("Pragma", "no-cache")
+	header.Set("Expires", "0")
+}
+
+func setImmutableCache(header http.Header) {
+	header.Set("Cache-Control", "public, max-age=31536000, immutable")
+	header.Del("Pragma")
+	header.Del("Expires")
 }
 
 func (s *Server) health(response http.ResponseWriter, request *http.Request) {
@@ -791,51 +802,214 @@ func (s *Server) static(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	relative := strings.TrimPrefix(filepath.Clean("/"+decoded), "/")
-	target := filepath.Join(s.cfg.StaticRoot, relative)
-	if !withinRoot(s.cfg.StaticRoot, target) {
-		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid_path"})
+	target, info, exists, err := inspectStaticPath(s.cfg.StaticRoot, filepath.Join(s.cfg.StaticRoot, relative))
+	if err != nil {
+		if errors.Is(err, errUnsafeStaticPath) {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid_path"})
+			return
+		}
+		writeJSON(response, http.StatusNotFound, map[string]string{"error": "not_found"})
 		return
 	}
-	info, statErr := os.Stat(target)
-	if statErr != nil || !info.Mode().IsRegular() {
+	servingIndex := false
+	if !exists || !info.Mode().IsRegular() {
 		if !strings.Contains(request.Header.Get("Accept"), "text/html") {
 			writeJSON(response, http.StatusNotFound, map[string]string{"error": "not_found"})
 			return
 		}
-		target = s.staticIndex
-		info, _ = os.Stat(target)
+		target, info, exists, err = inspectStaticPath(s.cfg.StaticRoot, s.staticIndex)
+		if err != nil || !exists || !info.Mode().IsRegular() {
+			if errors.Is(err, errUnsafeStaticPath) {
+				writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid_path"})
+				return
+			}
+			writeJSON(response, http.StatusNotFound, map[string]string{"error": "not_found"})
+			return
+		}
+		servingIndex = true
 	}
-	resolvedTarget, err := filepath.EvalSymlinks(target)
-	if err != nil || !withinRoot(s.cfg.StaticRoot, resolvedTarget) {
-		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid_path"})
-		return
+
+	originalTarget := target
+	originalInfo := info
+	contentEncoding := ""
+	if request.Header.Get("Range") == "" {
+		target, info, contentEncoding, err = s.encodedStaticPath(request, originalTarget, originalInfo)
+		if err != nil {
+			if errors.Is(err, errUnsafeStaticPath) {
+				writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid_path"})
+				return
+			}
+			writeJSON(response, http.StatusNotFound, map[string]string{"error": "not_found"})
+			return
+		}
 	}
-	target = resolvedTarget
+
 	file, err := os.Open(target)
 	if err != nil {
 		writeJSON(response, http.StatusNotFound, map[string]string{"error": "not_found"})
 		return
 	}
 	defer file.Close()
-	if contentType := mime.TypeByExtension(filepath.Ext(target)); contentType != "" {
+	openedInfo, err := file.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() {
+		writeJSON(response, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	}
+
+	if !servingIndex && strings.HasPrefix(filepath.ToSlash(relative), "assets/") {
+		setImmutableCache(response.Header())
+	} else {
+		setNoStore(response.Header())
+	}
+	addVary(response.Header(), "Accept-Encoding")
+	if contentEncoding != "" {
+		response.Header().Set("Content-Encoding", contentEncoding)
+	}
+	if contentType := mime.TypeByExtension(filepath.Ext(originalTarget)); contentType != "" {
 		response.Header().Set("Content-Type", contentType)
 	}
-	http.ServeContent(response, request, info.Name(), info.ModTime(), file)
+	http.ServeContent(response, request, originalInfo.Name(), originalInfo.ModTime(), file)
 }
 
-func withinRoot(root, target string) bool {
-	resolvedRoot, err := filepath.EvalSymlinks(root)
+var errUnsafeStaticPath = errors.New("unsafe static path")
+
+func inspectStaticPath(root, target string) (string, os.FileInfo, bool, error) {
+	rootAbsolute, err := filepath.Abs(root)
 	if err != nil {
-		resolvedRoot, err = filepath.Abs(root)
+		return "", nil, false, err
+	}
+	targetAbsolute, err := filepath.Abs(target)
+	if err != nil {
+		return "", nil, false, err
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(rootAbsolute)
+	if err != nil {
+		return "", nil, false, err
+	}
+	resolvedRoot, err = filepath.Abs(resolvedRoot)
+	if err != nil {
+		return "", nil, false, err
+	}
+	if !pathWithinRoot(rootAbsolute, targetAbsolute) && !pathWithinRoot(resolvedRoot, targetAbsolute) {
+		return "", nil, false, errUnsafeStaticPath
+	}
+
+	resolvedTarget, err := filepath.EvalSymlinks(targetAbsolute)
+	if err == nil {
+		resolvedTarget, err = filepath.Abs(resolvedTarget)
 		if err != nil {
-			return false
+			return "", nil, false, err
+		}
+		if !pathWithinRoot(resolvedRoot, resolvedTarget) {
+			return "", nil, false, errUnsafeStaticPath
+		}
+		info, err := os.Stat(resolvedTarget)
+		if err != nil {
+			return "", nil, false, err
+		}
+		return resolvedTarget, info, true, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", nil, false, err
+	}
+
+	for ancestor := targetAbsolute; ; ancestor = filepath.Dir(ancestor) {
+		_, statErr := os.Lstat(ancestor)
+		if statErr == nil {
+			resolvedAncestor, resolveErr := filepath.EvalSymlinks(ancestor)
+			if resolveErr != nil {
+				return "", nil, false, errUnsafeStaticPath
+			}
+			resolvedAncestor, resolveErr = filepath.Abs(resolvedAncestor)
+			if resolveErr != nil {
+				return "", nil, false, resolveErr
+			}
+			if !pathWithinRoot(resolvedRoot, resolvedAncestor) {
+				return "", nil, false, errUnsafeStaticPath
+			}
+			return targetAbsolute, nil, false, nil
+		}
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return "", nil, false, statErr
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return "", nil, false, errUnsafeStaticPath
 		}
 	}
-	resolvedTarget, err := filepath.Abs(target)
-	if err != nil {
-		return false
+}
+
+func (s *Server) encodedStaticPath(request *http.Request, target string, originalInfo os.FileInfo) (string, os.FileInfo, string, error) {
+	representations := []struct {
+		encoding string
+		suffix   string
+	}{
+		{encoding: "br", suffix: ".br"},
+		{encoding: "gzip", suffix: ".gz"},
 	}
-	relative, err := filepath.Rel(resolvedRoot, resolvedTarget)
+	for _, representation := range representations {
+		if !acceptsEncoding(request.Header.Values("Accept-Encoding"), representation.encoding) {
+			continue
+		}
+		encodedTarget, encodedInfo, exists, err := inspectStaticPath(s.cfg.StaticRoot, target+representation.suffix)
+		if err != nil {
+			return "", nil, "", err
+		}
+		if !exists || !encodedInfo.Mode().IsRegular() || encodedInfo.ModTime().Before(originalInfo.ModTime()) {
+			continue
+		}
+		return encodedTarget, encodedInfo, representation.encoding, nil
+	}
+	return target, originalInfo, "", nil
+}
+
+func acceptsEncoding(values []string, wanted string) bool {
+	explicit := false
+	explicitAccepted := false
+	wildcard := false
+	wildcardAccepted := false
+	for _, value := range values {
+		for _, item := range strings.Split(value, ",") {
+			parts := strings.Split(item, ";")
+			name := strings.ToLower(strings.TrimSpace(parts[0]))
+			accepted := true
+			for _, parameter := range parts[1:] {
+				key, raw, found := strings.Cut(strings.TrimSpace(parameter), "=")
+				if !found || !strings.EqualFold(strings.TrimSpace(key), "q") {
+					continue
+				}
+				quality, parseErr := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+				accepted = parseErr == nil && quality > 0 && quality <= 1
+			}
+			switch name {
+			case wanted:
+				explicit = true
+				explicitAccepted = accepted
+			case "*":
+				wildcard = true
+				wildcardAccepted = accepted
+			}
+		}
+	}
+	if explicit {
+		return explicitAccepted
+	}
+	return wildcard && wildcardAccepted
+}
+
+func addVary(header http.Header, value string) {
+	for _, current := range header.Values("Vary") {
+		for _, item := range strings.Split(current, ",") {
+			if strings.EqualFold(strings.TrimSpace(item), value) {
+				return
+			}
+		}
+	}
+	header.Add("Vary", value)
+}
+
+func pathWithinRoot(root, target string) bool {
+	relative, err := filepath.Rel(root, target)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 

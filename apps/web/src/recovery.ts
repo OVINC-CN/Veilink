@@ -16,7 +16,9 @@ import type { ChatMessage, MessageDeliveryRecipient, PendingDeliveryAcknowledgem
 import type { DerivedKeys, SessionIdentity } from './crypto/types'
 import { base64UrlToBytes, bytesToBase64Url, randomBytes } from './lib/encoding'
 
-const STORAGE_KEY = 'veilink.recovery.v1'
+const LEGACY_STORAGE_KEY = 'veilink.recovery.v1'
+const STATE_STORAGE_KEY = 'veilink.recovery.state.v2'
+const HISTORY_STORAGE_KEY = 'veilink.recovery.history.v2'
 const HISTORY_KEY = '__veilinkRecoveryKey'
 const MAX_ENVELOPE_BYTES = 1_500_000
 const MAX_PLAINTEXT_BYTES = 1_000_000
@@ -77,7 +79,8 @@ export interface RecoveryBundle {
   pendingDeliveryAcknowledgements?: PendingDeliveryAcknowledgement[]
 }
 
-let writeChain = Promise.resolve()
+let stateWriteChain = Promise.resolve()
+let historyWriteChain = Promise.resolve()
 let recoveryGeneration = 0
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -114,13 +117,19 @@ function ensureHistoryRecoveryKey(): Uint8Array {
   return key
 }
 
-function aad(roomId: string): Uint8Array {
-  return encoder.encode(`veilink/recovery/v1\0${roomId}`)
+type RecoveryPurpose = 'legacy' | 'state' | 'history'
+
+function aad(roomId: string, purpose: RecoveryPurpose): Uint8Array {
+  return encoder.encode(purpose === 'legacy'
+    ? `veilink/recovery/v1\0${roomId}`
+    : `veilink/recovery/v2/${purpose}\0${roomId}`)
 }
 
 function purgeRecoveryArtifacts(): void {
   try {
-    sessionStorage.removeItem(STORAGE_KEY)
+    sessionStorage.removeItem(LEGACY_STORAGE_KEY)
+    sessionStorage.removeItem(STATE_STORAGE_KEY)
+    sessionStorage.removeItem(HISTORY_STORAGE_KEY)
   } catch {
     // Storage can be unavailable; server-side resume leases still expire.
   }
@@ -316,8 +325,10 @@ function recoverableMessages(messages: ChatMessage[]): ChatMessage[] {
 export function hasRecoveryHint(roomId?: string): boolean {
   if (!roomId || !historyRecoveryKey()) return false
   try {
-    const envelope = parseEnvelope(sessionStorage.getItem(STORAGE_KEY) ?? '')
-    return envelope?.roomId === roomId && envelope.expiresAt > Date.now()
+    return [STATE_STORAGE_KEY, LEGACY_STORAGE_KEY].some((storageKey) => {
+      const envelope = parseEnvelope(sessionStorage.getItem(storageKey) ?? '')
+      return envelope?.roomId === roomId && envelope.expiresAt > Date.now()
+    })
   } catch {
     return false
   }
@@ -367,6 +378,21 @@ export function buildRecoveryBundle(input: {
   }
 }
 
+export function buildRecoveryStateBundle(
+  input: Parameters<typeof buildRecoveryBundle>[0],
+  counterCeiling: number,
+): RecoveryBundle {
+  const bundle = buildRecoveryBundle({ ...input, messages: [] })
+  return {
+    ...bundle,
+    identity: {
+      ...bundle.identity,
+      counter: counterCeiling,
+    },
+    messages: [],
+  }
+}
+
 export function restoreIdentity(bundle: RecoveryBundle): SessionIdentity {
   return {
     publicKey: base64UrlToBytes(bundle.identity.publicKey),
@@ -394,15 +420,27 @@ export function restorePendingDeliveryAcknowledgements(bundle: RecoveryBundle): 
   return parsePendingDeliveryAcknowledgements(bundle.pendingDeliveryAcknowledgements ?? []) ?? []
 }
 
-export function saveRecovery(bundle: RecoveryBundle): Promise<boolean> {
+function saveRecoveryForPurpose(
+  bundle: RecoveryBundle,
+  storageKey: string,
+  purpose: Exclude<RecoveryPurpose, 'legacy'>,
+): Promise<boolean> {
   const generation = recoveryGeneration
   let saved = false
-  writeChain = writeChain.then(async () => {
+  const previous = purpose === 'state' ? stateWriteChain : historyWriteChain
+  const next = previous.then(async () => {
     if (generation !== recoveryGeneration || bundle.expiresAt <= Date.now()) return
     const plaintext = encoder.encode(JSON.stringify(bundle))
     if (plaintext.byteLength > MAX_PLAINTEXT_BYTES) {
       plaintext.fill(0)
-      purgeRecoveryArtifacts()
+      if (purpose === 'state') purgeRecoveryArtifacts()
+      else {
+        try {
+          sessionStorage.removeItem(HISTORY_STORAGE_KEY)
+        } catch {
+          // History is optional; preserve the critical checkpoint.
+        }
+      }
       return
     }
     let keyBytes: Uint8Array | undefined
@@ -410,7 +448,7 @@ export function saveRecovery(bundle: RecoveryBundle): Promise<boolean> {
       keyBytes = ensureHistoryRecoveryKey()
       const key = await importKey(keyBytes)
       const iv = randomBytes(12)
-      const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: toArrayBuffer(iv), additionalData: toArrayBuffer(aad(bundle.roomId)), tagLength: 128 }, key, toArrayBuffer(plaintext))
+      const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: toArrayBuffer(iv), additionalData: toArrayBuffer(aad(bundle.roomId, purpose)), tagLength: 128 }, key, toArrayBuffer(plaintext))
       const envelope: StoredEnvelope = {
         v: 1,
         roomId: bundle.roomId,
@@ -420,25 +458,49 @@ export function saveRecovery(bundle: RecoveryBundle): Promise<boolean> {
       }
       const serialized = JSON.stringify(envelope)
       if (generation === recoveryGeneration && serialized.length <= MAX_ENVELOPE_BYTES) {
-        sessionStorage.setItem(STORAGE_KEY, serialized)
+        sessionStorage.setItem(storageKey, serialized)
+        if (purpose === 'state') sessionStorage.removeItem(LEGACY_STORAGE_KEY)
         saved = true
       }
     } finally {
       plaintext.fill(0)
       keyBytes?.fill(0)
     }
-  }).catch(() => purgeRecoveryArtifacts())
-  return writeChain.then(() => saved)
+  }).catch(() => {
+    if (purpose === 'state') {
+      purgeRecoveryArtifacts()
+      return
+    }
+    try {
+      sessionStorage.removeItem(HISTORY_STORAGE_KEY)
+    } catch {
+      // History is optional; the critical state checkpoint remains authoritative.
+    }
+  })
+  if (purpose === 'state') stateWriteChain = next
+  else historyWriteChain = next
+  return next.then(() => saved)
 }
 
-export async function loadRecovery(expectedRoomId: string): Promise<RecoveryBundle | undefined> {
-  const keyBytes = historyRecoveryKey()
-  if (!keyBytes) return undefined
+export function saveRecoveryState(bundle: RecoveryBundle): Promise<boolean> {
+  return saveRecoveryForPurpose(bundle, STATE_STORAGE_KEY, 'state')
+}
+
+export function saveRecoveryHistory(bundle: RecoveryBundle): Promise<boolean> {
+  return saveRecoveryForPurpose(bundle, HISTORY_STORAGE_KEY, 'history')
+}
+
+async function loadRecoveryForPurpose(
+  expectedRoomId: string,
+  storageKey: string,
+  purpose: RecoveryPurpose,
+  keyBytes: Uint8Array,
+): Promise<RecoveryBundle | undefined> {
   try {
-    const envelope = parseEnvelope(sessionStorage.getItem(STORAGE_KEY) ?? '')
+    const envelope = parseEnvelope(sessionStorage.getItem(storageKey) ?? '')
     if (!envelope || envelope.roomId !== expectedRoomId || envelope.expiresAt <= Date.now()) return undefined
     const key = await importKey(keyBytes)
-    const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: toArrayBuffer(base64UrlToBytes(envelope.iv)), additionalData: toArrayBuffer(aad(envelope.roomId)), tagLength: 128 }, key, toArrayBuffer(base64UrlToBytes(envelope.ciphertext)))
+    const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: toArrayBuffer(base64UrlToBytes(envelope.iv)), additionalData: toArrayBuffer(aad(envelope.roomId, purpose)), tagLength: 128 }, key, toArrayBuffer(base64UrlToBytes(envelope.ciphertext)))
     const plaintext = new Uint8Array(decrypted)
     try {
       const bundle = parseBundle(JSON.parse(decoder.decode(plaintext)) as unknown)
@@ -450,6 +512,22 @@ export async function loadRecovery(expectedRoomId: string): Promise<RecoveryBund
     }
   } catch {
     return undefined
+  }
+}
+
+export async function loadRecovery(expectedRoomId: string): Promise<RecoveryBundle | undefined> {
+  const keyBytes = historyRecoveryKey()
+  if (!keyBytes) return undefined
+  try {
+    const state = await loadRecoveryForPurpose(expectedRoomId, STATE_STORAGE_KEY, 'state', keyBytes)
+    if (state) {
+      const history = await loadRecoveryForPurpose(expectedRoomId, HISTORY_STORAGE_KEY, 'history', keyBytes)
+      return {
+        ...state,
+        messages: history?.messages ?? [],
+      }
+    }
+    return await loadRecoveryForPurpose(expectedRoomId, LEGACY_STORAGE_KEY, 'legacy', keyBytes)
   } finally {
     keyBytes.fill(0)
   }

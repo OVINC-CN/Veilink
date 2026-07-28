@@ -1,4 +1,4 @@
-import { PROTOCOL_VERSION } from "./constants.js";
+import { FILE_CHUNK_SIZE_BYTES, PROTOCOL_VERSION } from "./constants.js";
 import {
   ChallengeIdSchema,
   ChallengeSchema,
@@ -37,7 +37,7 @@ export const CRYPTO_SUITE = {
   },
   fileEncryption: {
     algorithm: "XChaCha20-Poly1305-secretstream",
-    chunkBytes: 65_536,
+    chunkBytes: FILE_CHUNK_SIZE_BYTES,
     headerBytes: 24,
   },
   identity: {

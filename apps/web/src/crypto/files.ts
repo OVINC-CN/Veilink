@@ -1,3 +1,11 @@
+import {
+  encodeFileChunk,
+  inspectFileChunk,
+  type AttachmentId,
+} from '../protocol'
+
+export const FILE_ENCRYPTION_CREDIT_WINDOW = 8
+
 export interface EncryptedFileStart {
   fileId: string
   header: string
@@ -69,6 +77,92 @@ function requestWorker(
   })
 }
 
+function streamEncryptedChunks(
+  worker: Worker,
+  fileId: string,
+  onChunk: (chunk: EncryptedFileChunk) => Promise<void> | void,
+  signal?: AbortSignal,
+): Promise<void> {
+  throwIfAborted(signal)
+  return new Promise<void>((resolve, reject) => {
+    const queue: Extract<WorkerResponse, { type: 'chunk' }>[] = []
+    let draining = false
+    let settled = false
+
+    const cleanup = (): void => {
+      worker.removeEventListener('message', onMessage)
+      worker.removeEventListener('error', onError)
+      signal?.removeEventListener('abort', onAbort)
+    }
+    const settle = (error?: unknown): void => {
+      if (settled) return
+      settled = true
+      queue.length = 0
+      cleanup()
+      if (error === undefined) resolve()
+      else reject(error)
+    }
+    const onError = (): void => {
+      settle(new Error('File crypto worker failed'))
+    }
+    const onAbort = (): void => {
+      worker.terminate()
+      settle(abortError())
+    }
+    const drain = async (): Promise<void> => {
+      if (draining || settled) return
+      draining = true
+      try {
+        while (queue.length > 0 && !settled) {
+          throwIfAborted(signal)
+          const response = queue.shift()!
+          await onChunk({
+            fileId,
+            index: response.index,
+            final: response.final,
+            ciphertext: new Uint8Array(response.ciphertext),
+            ...(response.digest ? { digest: new Uint8Array(response.digest) } : {}),
+          })
+          if (settled) return
+          if (response.final) {
+            if (queue.length !== 0) throw new Error('File crypto worker produced chunks after the final chunk')
+            settle()
+            return
+          }
+          worker.postMessage({ type: 'encrypt-credit', count: 1 })
+        }
+      } catch (error) {
+        settle(error)
+      } finally {
+        draining = false
+        if (queue.length > 0 && !settled) void drain()
+      }
+    }
+    const onMessage = (event: MessageEvent<WorkerResponse>): void => {
+      if (settled) return
+      if (event.data.type === 'error') {
+        settle(new Error(event.data.message))
+        return
+      }
+      if (event.data.type !== 'chunk') {
+        settle(new Error('File crypto worker returned an invalid stream response'))
+        return
+      }
+      queue.push(event.data)
+      if (queue.length > FILE_ENCRYPTION_CREDIT_WINDOW) {
+        settle(new Error('File crypto worker exceeded its credit window'))
+        return
+      }
+      void drain()
+    }
+
+    worker.addEventListener('message', onMessage)
+    worker.addEventListener('error', onError)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    worker.postMessage({ type: 'encrypt-credit', count: FILE_ENCRYPTION_CREDIT_WINDOW })
+  })
+}
+
 export async function encryptFile(
   file: File,
   fileId: string,
@@ -83,19 +177,7 @@ export async function encryptFile(
     const ready = await requestWorker(worker, { type: 'encrypt-init', file, fileId, rootFileKey: key.buffer }, [key.buffer], signal)
     if (ready.type !== 'ready' || !ready.header) throw new Error('File crypto worker did not initialize')
     await onStart({ fileId, header: ready.header })
-    let final = false
-    while (!final) {
-      const response = await requestWorker(worker, { type: 'encrypt-next' }, [], signal)
-      if (response.type !== 'chunk') throw new Error('File crypto worker returned an invalid chunk')
-      final = response.final
-      await onChunk({
-        fileId,
-        index: response.index,
-        final,
-        ciphertext: new Uint8Array(response.ciphertext),
-        ...(response.digest ? { digest: new Uint8Array(response.digest) } : {}),
-      })
-    }
+    await streamEncryptedChunks(worker, fileId, onChunk, signal)
   } finally {
     try { worker.postMessage({ type: 'destroy' }) } catch { /* The worker may already be terminated. */ }
     worker.terminate()
@@ -137,16 +219,23 @@ export class FileDecryptor {
 
   async push(frame: EncryptedFileChunk): Promise<Blob | null> {
     if (this.destroyed || frame.fileId !== this.fileId) throw new Error('File decryptor is unavailable')
-    const ciphertext = frame.ciphertext.slice()
-    const digest = frame.digest?.slice()
-    const response = await requestWorker(this.worker, {
-      type: 'decrypt-push',
-      fileId: frame.fileId,
-      index: frame.index,
+    return await this.pushFrame(encodeFileChunk({
+      attachmentId: frame.fileId as AttachmentId,
+      chunkIndex: frame.index,
       final: frame.final,
-      ciphertext: ciphertext.buffer,
-      ...(digest ? { digest: digest.buffer } : {}),
-    }, [ciphertext.buffer, ...(digest ? [digest.buffer] : [])], this.controller.signal)
+      ciphertext: frame.ciphertext,
+      ...(frame.digest ? { digest: frame.digest } : {}),
+    }))
+  }
+
+  async pushFrame(frame: ArrayBuffer): Promise<Blob | null> {
+    if (this.destroyed) throw new Error('File decryptor is unavailable')
+    const inspected = inspectFileChunk(frame)
+    if (inspected.attachmentId !== this.fileId) throw new Error('File decryptor is unavailable')
+    const response = await requestWorker(this.worker, {
+      type: 'decrypt-frame',
+      frame,
+    }, [frame], this.controller.signal)
     if (response.type !== 'decrypted') throw new Error('File crypto worker returned an invalid response')
     return response.blob ?? null
   }

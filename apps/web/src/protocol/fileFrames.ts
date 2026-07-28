@@ -1,6 +1,7 @@
 import {
   DIGEST_BYTES,
   FILE_CHUNK_SIZE_BYTES,
+  MAX_FILE_CHUNK_FRAME_BYTES,
   MEMBER_ID_BYTES,
   PROTOCOL_VERSION,
 } from './constants.js'
@@ -18,6 +19,53 @@ export interface BinaryFileChunk {
   final: boolean
   ciphertext: Uint8Array
   digest?: Uint8Array
+}
+
+export interface InspectedFileChunk {
+  attachmentId: AttachmentId
+  chunkIndex: number
+  final: boolean
+  byteLength: number
+}
+
+function inspectFrameLayout(buffer: ArrayBuffer): InspectedFileChunk & {
+  ciphertextOffset: number
+} {
+  const bytes = new Uint8Array(buffer)
+  if (bytes.byteLength < FIXED_HEADER_BYTES + SECRETSTREAM_OVERHEAD_BYTES) throw new Error('File chunk frame is too short')
+  if (bytes.byteLength > MAX_FILE_CHUNK_FRAME_BYTES) throw new Error('File chunk frame is too large')
+  if (bytes[0] !== PROTOCOL_VERSION || bytes[1] !== FILE_CHUNK_FRAME_TYPE) throw new Error('Unsupported file chunk frame')
+  const flags = bytes[FIXED_HEADER_BYTES - 1]!
+  if ((flags & ~FINAL_FLAG) !== 0) throw new Error('File chunk frame flags are invalid')
+  const final = (flags & FINAL_FLAG) !== 0
+  const digestBytes = final ? DIGEST_BYTES : 0
+  const ciphertextOffset = FIXED_HEADER_BYTES + digestBytes
+  const ciphertextLength = bytes.byteLength - ciphertextOffset
+  if (ciphertextLength < SECRETSTREAM_OVERHEAD_BYTES || ciphertextLength > FILE_CHUNK_SIZE_BYTES + SECRETSTREAM_OVERHEAD_BYTES) {
+    throw new Error('Encrypted file chunk length is invalid')
+  }
+  return {
+    attachmentId: base64UrlEncode(bytes.subarray(2, 2 + MEMBER_ID_BYTES)) as AttachmentId,
+    chunkIndex: new DataView(buffer).getUint32(2 + MEMBER_ID_BYTES, false),
+    final,
+    byteLength: bytes.byteLength,
+    ciphertextOffset,
+  }
+}
+
+/**
+ * Validates only the bounded routing header and frame layout. The ciphertext
+ * remains in the caller-owned buffer so it can be transferred to a crypto
+ * worker without a full-frame copy.
+ */
+export function inspectFileChunk(buffer: ArrayBuffer): InspectedFileChunk {
+  const inspected = inspectFrameLayout(buffer)
+  return {
+    attachmentId: inspected.attachmentId,
+    chunkIndex: inspected.chunkIndex,
+    final: inspected.final,
+    byteLength: inspected.byteLength,
+  }
 }
 
 export function encodeFileChunk(frame: BinaryFileChunk): ArrayBuffer {
@@ -46,22 +94,12 @@ export function encodeFileChunk(frame: BinaryFileChunk): ArrayBuffer {
 
 export function decodeFileChunk(buffer: ArrayBuffer): BinaryFileChunk {
   const bytes = new Uint8Array(buffer)
-  if (bytes.byteLength < FIXED_HEADER_BYTES + SECRETSTREAM_OVERHEAD_BYTES) throw new Error('File chunk frame is too short')
-  if (bytes[0] !== PROTOCOL_VERSION || bytes[1] !== FILE_CHUNK_FRAME_TYPE) throw new Error('Unsupported file chunk frame')
-  const flags = bytes[FIXED_HEADER_BYTES - 1]!
-  if ((flags & ~FINAL_FLAG) !== 0) throw new Error('File chunk frame flags are invalid')
-  const final = (flags & FINAL_FLAG) !== 0
-  const digestBytes = final ? DIGEST_BYTES : 0
-  const ciphertextOffset = FIXED_HEADER_BYTES + digestBytes
-  const ciphertextLength = bytes.byteLength - ciphertextOffset
-  if (ciphertextLength < SECRETSTREAM_OVERHEAD_BYTES || ciphertextLength > FILE_CHUNK_SIZE_BYTES + SECRETSTREAM_OVERHEAD_BYTES) {
-    throw new Error('Encrypted file chunk length is invalid')
-  }
+  const inspected = inspectFrameLayout(buffer)
   return {
-    attachmentId: base64UrlEncode(bytes.subarray(2, 2 + MEMBER_ID_BYTES)) as AttachmentId,
-    chunkIndex: new DataView(buffer).getUint32(2 + MEMBER_ID_BYTES, false),
-    final,
-    ciphertext: bytes.slice(ciphertextOffset),
-    ...(final ? { digest: bytes.slice(FIXED_HEADER_BYTES, ciphertextOffset) } : {}),
+    attachmentId: inspected.attachmentId,
+    chunkIndex: inspected.chunkIndex,
+    final: inspected.final,
+    ciphertext: bytes.subarray(inspected.ciphertextOffset),
+    ...(inspected.final ? { digest: bytes.subarray(FIXED_HEADER_BYTES, inspected.ciphertextOffset) } : {}),
   }
 }

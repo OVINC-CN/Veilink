@@ -443,16 +443,35 @@ export const AttachmentTransferStateSchema = z.enum([
   "cancelled",
 ]);
 
+export const AttachmentFailureCodeSchema = z.enum([
+  "recipient-too-slow",
+  "file-channel-unavailable",
+  "browser-incompatible",
+  "receiver-overloaded",
+  "sender-cancelled",
+]);
+export type AttachmentFailureCode = z.infer<typeof AttachmentFailureCodeSchema>;
+
 export const AttachmentStateSchema = z
   .object({
     type: z.literal("attachment-state"),
     attachmentId: AttachmentIdSchema,
     state: AttachmentTransferStateSchema,
     transferredBytes: z.number().int().nonnegative().max(MAX_FILE_SIZE_BYTES),
+    failureCode: AttachmentFailureCodeSchema.optional(),
     error: z.string().max(256).optional(),
   })
   .strict();
 export type AttachmentState = z.infer<typeof AttachmentStateSchema>;
+
+export const AttachmentCancelSchema = z
+  .object({
+    type: z.literal("attachment-cancel"),
+    attachmentId: AttachmentIdSchema,
+    reason: AttachmentFailureCodeSchema,
+  })
+  .strict();
+export type AttachmentCancel = z.infer<typeof AttachmentCancelSchema>;
 
 export const MessageDeliveredSchema = z
   .object({
@@ -466,6 +485,7 @@ export const ChatPayloadSchema = z.discriminatedUnion("type", [
   RichTextMessageSchema,
   AttachmentOfferSchema,
   AttachmentStateSchema,
+  AttachmentCancelSchema,
   MessageDeliveredSchema,
 ]);
 export type ChatPayload = z.infer<typeof ChatPayloadSchema>;

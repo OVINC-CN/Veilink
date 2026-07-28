@@ -1,4 +1,4 @@
-import type { ReplyReference } from './protocol'
+import type { AttachmentFailureCode, ReplyReference } from './protocol'
 import type { DerivedKeys } from './crypto/types'
 
 export interface Member {
@@ -43,6 +43,9 @@ export interface AttachmentRecipientView {
   memberId: string
   nickname: string
   status: 'offered' | 'accepted' | 'transferring' | 'complete' | 'declined' | 'failed' | 'cancelled'
+  startedAt: number
+  finishedAt?: number
+  failureReason?: AttachmentFailureCode
   transferredBytes: number
   progress: number
   bytesPerSecond: number

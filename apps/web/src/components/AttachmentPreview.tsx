@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom'
 import { t } from '../i18n'
 import type { AttachmentView } from '../models'
 import type { Locale } from '../preferences'
+import type { AttachmentFailureCode } from '../protocol'
 
 const PdfPreview = lazy(async () => {
   const module = await import('./PdfPreview')
@@ -14,6 +15,34 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KiB`
   return `${(bytes / 1024 ** 2).toFixed(1)} MiB`
+}
+
+function formatDuration(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1_000))
+  const seconds = totalSeconds % 60
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  if (totalMinutes === 0) return `${seconds}s`
+
+  const minutes = totalMinutes % 60
+  const hours = Math.floor(totalMinutes / 60)
+  return hours === 0 ? `${minutes}m ${seconds}s` : `${hours}h ${minutes}m ${seconds}s`
+}
+
+const failureReasonLabels: Record<Locale, Record<AttachmentFailureCode, string>> = {
+  'zh-CN': {
+    'recipient-too-slow': '接收方速度过慢',
+    'file-channel-unavailable': '文件通道不可用',
+    'browser-incompatible': '浏览器不支持高速文件传输',
+    'receiver-overloaded': '接收端负载过高',
+    'sender-cancelled': '发送方已取消',
+  },
+  'en-US': {
+    'recipient-too-slow': 'Recipient too slow',
+    'file-channel-unavailable': 'File channel unavailable',
+    'browser-incompatible': 'Browser does not support fast file transfers',
+    'receiver-overloaded': 'Receiver overloaded',
+    'sender-cancelled': 'Cancelled by sender',
+  },
 }
 
 function TypeIcon({ mime }: { mime: string }) {
@@ -39,10 +68,20 @@ export function AttachmentPreview({ attachment, locale, onPreviewOpen }: Attachm
   const previewablePdf = attachment.previewable && available && attachment.objectUrl && attachment.mime === 'application/pdf'
   const [previewOpen, setPreviewOpen] = useState(false)
   const [recipientsOpen, setRecipientsOpen] = useState(false)
+  const [now, setNow] = useState(() => Date.now())
   const opener = useRef<HTMLButtonElement>(null)
   const dialog = useRef<HTMLElement>(null)
   const closeButton = useRef<HTMLButtonElement>(null)
   const titleId = useId()
+  const hasActiveRecipient = attachment.recipients?.some((recipient) =>
+    recipient.status === 'offered' || recipient.status === 'accepted' || recipient.status === 'transferring'
+  ) ?? false
+
+  useEffect(() => {
+    if (!recipientsOpen || !hasActiveRecipient) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000)
+    return () => window.clearInterval(timer)
+  }, [hasActiveRecipient, recipientsOpen])
 
   useEffect(() => {
     if (!previewOpen) return
@@ -146,10 +185,17 @@ export function AttachmentPreview({ attachment, locale, onPreviewOpen }: Attachm
             const speed = recipient.bytesPerSecond > 0 ? `${formatBytes(recipient.bytesPerSecond)}/s` : undefined
             const eta = recipient.etaSeconds !== undefined ? `${recipient.etaSeconds}s` : undefined
             const rtt = recipient.rttMs !== undefined ? `RTT ${recipient.rttMs}ms` : undefined
+            const durationEnd = recipient.finishedAt ?? (active ? now : recipient.startedAt)
+            const duration = `${locale === 'zh-CN' ? '总耗时' : 'Total time'} ${formatDuration(durationEnd - recipient.startedAt)}`
+            const failureReason = recipient.failureReason
+              ? locale === 'zh-CN'
+                ? `原因：${failureReasonLabels[locale][recipient.failureReason]}`
+                : `Reason: ${failureReasonLabels[locale][recipient.failureReason]}`
+              : undefined
             return (
               <div className="attachment-recipient" key={recipient.memberId}>
                 <span className="attachment-recipient-icon">{active ? <SpinnerGap className="is-spinning" /> : recipient.status === 'complete' ? <CheckCircle weight="fill" /> : <XCircle weight="fill" />}</span>
-                <span><strong>{recipient.nickname}</strong><small>{[label, speed, eta, rtt].filter(Boolean).join(' · ')}</small></span>
+                <span><strong>{recipient.nickname}</strong><small>{[label, speed, eta, rtt, duration, failureReason].filter(Boolean).join(' · ')}</small></span>
                 {active ? <progress value={recipient.progress} max={1} aria-label={`${recipient.nickname}: ${Math.round(recipient.progress * 100)}%`} /> : null}
               </div>
             )

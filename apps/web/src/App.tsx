@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { ShieldCheck, SpinnerGap } from '@phosphor-icons/react'
 import {
   AttachmentMetadataSchema,
+  AttachmentIdSchema,
   ChatPayloadSchema,
   FILE_CHUNK_SIZE_BYTES,
   EncryptedChatFrameSchema,
@@ -13,15 +14,15 @@ import {
   PROTOCOL_VERSION,
   RoomIdSchema,
   buildInvitePath,
-  decodeFileChunk,
   encodeFileChunk,
   generateLinkSecret,
   generatePin,
   generateRoomId,
+  inspectFileChunk,
   normalizeFileName,
+  type AttachmentFailureCode,
   type AttachmentMetadata,
   type ChatPayload,
-  type BinaryFileChunk,
   type PublicMember,
   type ReplyReference,
   type RoomSnapshot,
@@ -73,6 +74,7 @@ import { documentMentionsMember, notifyMention } from './mentionNotifications'
 import { validateMedia } from './mediaValidation'
 import {
   buildRecoveryBundle,
+  buildRecoveryStateBundle,
   clearRecovery,
   hasRecoveryHint,
   loadRecovery,
@@ -80,10 +82,16 @@ import {
   restoreKeys,
   restorePendingDeliveryAcknowledgements,
   restoreReplayCounters,
-  saveRecovery,
+  saveRecoveryHistory,
+  saveRecoveryState,
 } from './recovery'
 import { PeerMesh, type PeerDiagnosticEvent, type PeerSignalPayload } from './transport/PeerMesh'
 import { SignalClient, SignalRequestError, type SessionConfirmation } from './transport/SignalClient'
+import {
+  consumeTerminalFileGraceBudget,
+  createTerminalFileGraceBudget,
+  type TerminalFileGraceBudget,
+} from './transport/terminalFileGrace'
 
 const RoomShell = lazy(async () => {
   const module = await import('./components/RoomShell')
@@ -101,7 +109,7 @@ interface PublicConfig {
 
 type Stage = 'create' | 'join' | 'created' | 'invite-recovering' | 'recovering' | 'room'
 
-const MAX_DATA_FRAME_BYTES = 128 * 1024
+const MAX_CONTROL_FRAME_BYTES = 128 * 1024
 const MAX_MESSAGES_IN_MEMORY = 500
 const MAX_PENDING_DELIVERY_ACKNOWLEDGEMENTS = 500
 const MAX_REPLAY_SESSIONS_PER_PEER = 4
@@ -109,15 +117,20 @@ const MAX_SEEN_ATTACHMENTS_PER_PEER = 64
 const MAX_CONCURRENT_INCOMING_FILES = 4
 const MAX_RETAINED_ATTACHMENT_BYTES = 512 * 1024 * 1024
 const MAX_PEER_FRAMES_PER_SECOND = 256
-const MAX_PEER_BYTES_PER_SECOND = 16 * 1024 * 1024
+const MAX_PEER_BYTES_PER_SECOND = 2 * 1024 * 1024
 const MAX_PEER_FRAME_VIOLATIONS = 3
 const PEER_FRAME_VIOLATION_WINDOW_MS = 10_000
+const MAX_INCOMING_FILE_QUEUE_BYTES = 32 * 1024 * 1024
+const OUTBOUND_RECIPIENT_BASE_QUEUE_BYTES = 2 * 1024 * 1024
+const MAX_OUTBOUND_RECIPIENT_LAG_BYTES = 16 * 1024 * 1024
 const INCOMING_TRANSFER_IDLE_TIMEOUT_MS = 2 * 60_000
 const OUTBOUND_TRANSFER_IDLE_TIMEOUT_MS = 2 * 60_000
 const ATTACHMENT_ACCEPT_TIMEOUT_MS = 3_000
 const ATTACHMENT_PROGRESS_INTERVAL_MS = 250
 const ATTACHMENT_ACK_INTERVAL_MS = 500
-const ATTACHMENT_ACK_BYTES = 512 * 1024
+const ATTACHMENT_ACK_BYTES = 4 * 1024 * 1024
+const RECOVERY_HISTORY_DEBOUNCE_MS = 250
+const OUTGOING_COUNTER_RESERVATION = 256
 const TURN_REFRESH_RETRY_MS = 30_000
 
 interface PeerRateWindow {
@@ -140,7 +153,8 @@ interface SessionRuntime {
   replayCounters: Map<string, number>
   peerRateWindows: Map<string, PeerRateWindow>
   peerViolationWindows: Map<string, PeerViolationWindow>
-  peerDataQueues: Map<string, Promise<void>>
+  peerControlQueues: Map<string, Promise<void>>
+  incomingFileQueues: Map<string, IncomingFileQueue>
   peerConnectionTimers: Map<string, { warning?: number; timeout: number }>
   peerConnectionTimeoutMs: number
   pendingDeliveryAcknowledgements: Map<string, PendingDeliveryAcknowledgement>
@@ -158,8 +172,12 @@ interface SessionRuntime {
   incomingAcknowledgements: Map<string, IncomingAcknowledgement>
   retainedAttachmentBytes: number
   seenAttachments: Set<string>
+  terminalFileGraceBudgets: Map<string, TerminalFileGraceBudget>
   outboundTransfers: Map<string, OutboundTransfer>
   transferEpoch: number
+  reservedCounterCeiling: number
+  outgoingEncryptionQueue: Promise<void>
+  recoveryHistoryTimer?: number
   unsubscribe: () => void
   resumeToken: string
   turnCredentialsExpiresAt: number
@@ -190,11 +208,18 @@ interface OutboundRecipient {
   bytesPerSecond: number
   rttMs?: number
   availableOutgoingBitrate?: number
+  startedAt: number
+  finishedAt?: number
+  failureReason?: AttachmentFailureCode
+  queue: ArrayBuffer[]
+  queuedBytes: number
+  drainPromise?: Promise<void>
+  capacityWaiters: Set<() => void>
   timeout?: number
 }
 
 interface OutboundTransfer {
-  attachmentId: string
+  attachmentId: AttachmentMetadata['attachmentId']
   viewId: string
   size: number
   controller: AbortController
@@ -211,6 +236,16 @@ interface IncomingAcknowledgement {
   attachmentId: AttachmentMetadata['attachmentId']
   lastSentAt: number
   lastSentBytes: number
+  pendingBytes: number
+  sending: boolean
+  timer?: number
+}
+
+interface IncomingFileQueue {
+  nextIndex: number
+  pending: Map<number, ArrayBuffer>
+  queuedBytes: number
+  draining: boolean
 }
 
 interface InitialConnectionGate {
@@ -375,6 +410,9 @@ function disposePendingJoin(pending: PendingJoin): void {
 }
 
 function releaseAttachment(runtime: SessionRuntime, viewId: string): void {
+  if (runtime.incomingTransfers.has(viewId) && runtime.seenAttachments.has(viewId)) {
+    runtime.terminalFileGraceBudgets.set(viewId, createTerminalFileGraceBudget())
+  }
   const timer = runtime.incomingTransferTimers.get(viewId)
   if (timer !== undefined) window.clearTimeout(timer)
   runtime.incomingTransferTimers.delete(viewId)
@@ -383,12 +421,41 @@ function releaseAttachment(runtime: SessionRuntime, viewId: string): void {
   runtime.decryptors.delete(viewId)
   runtime.attachmentMetadata.delete(viewId)
   runtime.incomingTransfers.delete(viewId)
+  const acknowledgement = runtime.incomingAcknowledgements.get(viewId)
+  if (acknowledgement?.timer !== undefined) window.clearTimeout(acknowledgement.timer)
   runtime.incomingAcknowledgements.delete(viewId)
+  const incomingQueue = runtime.incomingFileQueues.get(viewId)
+  if (incomingQueue) {
+    incomingQueue.pending.clear()
+    incomingQueue.queuedBytes = 0
+  }
+  runtime.incomingFileQueues.delete(viewId)
   const reserved = runtime.attachmentReservations.get(viewId)
   if (reserved !== undefined) {
     runtime.retainedAttachmentBytes = Math.max(0, runtime.retainedAttachmentBytes - reserved)
     runtime.attachmentReservations.delete(viewId)
   }
+}
+
+function wakeRecipientCapacity(recipient: OutboundRecipient): void {
+  for (const resolve of recipient.capacityWaiters) resolve()
+  recipient.capacityWaiters.clear()
+}
+
+function markOutboundRecipientTerminal(
+  recipient: OutboundRecipient,
+  status: Extract<OutboundRecipientStatus, 'complete' | 'declined' | 'failed' | 'cancelled'>,
+  failureReason?: AttachmentFailureCode,
+): void {
+  if (recipientTerminal(recipient.status)) return
+  recipient.status = status
+  recipient.finishedAt ??= Date.now()
+  recipient.failureReason = failureReason
+  if (recipient.timeout !== undefined) window.clearTimeout(recipient.timeout)
+  recipient.timeout = undefined
+  recipient.queue.length = 0
+  recipient.queuedBytes = 0
+  wakeRecipientCapacity(recipient)
 }
 
 function cancelTransfers(runtime: SessionRuntime): void {
@@ -397,7 +464,7 @@ function cancelTransfers(runtime: SessionRuntime): void {
     transfer.controller.abort()
     if (transfer.acceptanceTimer !== undefined) window.clearTimeout(transfer.acceptanceTimer)
     for (const recipient of transfer.recipients.values()) {
-      if (recipient.timeout !== undefined) window.clearTimeout(recipient.timeout)
+      markOutboundRecipientTerminal(recipient, 'cancelled', 'sender-cancelled')
     }
     transfer.acceptanceResolve()
     transfer.completionResolve()
@@ -499,6 +566,7 @@ export default function App() {
   const entryIdentityGenerationRef = useRef(0)
   const stopRuntimeRef = useRef<(sendLeave: boolean, options?: { preserveInvitation?: boolean }) => void>(() => undefined)
   const persistRecoveryRef = useRef<() => Promise<boolean>>(async () => false)
+  const scheduleRecoveryHistoryRef = useRef<() => void>(() => undefined)
   const recoveryAttemptedRef = useRef(false)
   const attachmentProgressRef = useRef(new Map<string, { lastAppliedAt: number; timer?: number; patch?: Partial<AttachmentView> }>())
   const [createdDetails, setCreatedDetails] = useState<{ pin: string; invitation: string }>()
@@ -731,7 +799,9 @@ export default function App() {
     if (!resolved) return
     roomRef.current = resolved
     setRoom(resolved)
-    void persistRecoveryRef.current()
+    void persistRecoveryRef.current().then((saved) => {
+      if (!saved && runtimeRef.current) abortForRecoveryFailure()
+    })
   }
 
   const updateMessages = (updater: (current: ChatMessage[]) => ChatMessage[], persist = true): void => {
@@ -749,7 +819,7 @@ export default function App() {
     }
     messagesRef.current = next
     setMessages(next)
-    if (persist) void persistRecoveryRef.current()
+    if (persist) scheduleRecoveryHistoryRef.current()
   }
 
   const finalizeOutgoingDelivery = (
@@ -839,6 +909,9 @@ export default function App() {
     transferredBytes: recipient.transferredBytes,
     progress: transfer.size === 0 ? 1 : Math.min(1, recipient.transferredBytes / transfer.size),
     bytesPerSecond: recipient.bytesPerSecond,
+    startedAt: recipient.startedAt,
+    ...(recipient.finishedAt !== undefined ? { finishedAt: recipient.finishedAt } : {}),
+    ...(recipient.failureReason !== undefined ? { failureReason: recipient.failureReason } : {}),
     ...(recipient.rttMs !== undefined ? { rttMs: recipient.rttMs } : {}),
     ...(recipient.availableOutgoingBitrate !== undefined ? { availableOutgoingBitrate: recipient.availableOutgoingBitrate } : {}),
     ...(recipient.bytesPerSecond > 0 && recipient.transferredBytes < transfer.size
@@ -875,10 +948,7 @@ export default function App() {
     if (recipient.timeout !== undefined) window.clearTimeout(recipient.timeout)
     recipient.timeout = window.setTimeout(() => {
       if (runtimeRef.current !== runtime || runtime.outboundTransfers.get(transfer.attachmentId) !== transfer || recipientTerminal(recipient.status)) return
-      recipient.status = 'failed'
-      recipient.timeout = undefined
-      syncOutboundTransfer(transfer, true)
-      settleOutboundTransfer(transfer)
+      cancelOutboundRecipient(runtime, transfer, recipient, 'failed', 'recipient-too-slow')
     }, OUTBOUND_TRANSFER_IDLE_TIMEOUT_MS)
   }
 
@@ -886,39 +956,73 @@ export default function App() {
     for (const transfer of runtime.outboundTransfers.values()) {
       const recipient = transfer.recipients.get(memberId)
       if (!recipient || recipientTerminal(recipient.status)) continue
-      recipient.status = 'failed'
-      if (recipient.timeout !== undefined) window.clearTimeout(recipient.timeout)
-      recipient.timeout = undefined
-      syncOutboundTransfer(transfer, true)
-      settleOutboundTransfer(transfer)
+      cancelOutboundRecipient(runtime, transfer, recipient, 'failed', 'file-channel-unavailable')
     }
     const prefix = `${memberId}:`
     for (const viewId of [...runtime.decryptors.keys()]) {
       if (!viewId.startsWith(prefix)) continue
+      const acknowledgement = runtime.incomingAcknowledgements.get(viewId)
       releaseAttachment(runtime, viewId)
       updateAttachmentProgress(viewId, { status: 'cancelled', progress: 0 }, true)
+      if (acknowledgement) {
+        void sendPayload({
+          type: 'attachment-state',
+          attachmentId: acknowledgement.attachmentId,
+          state: 'failed',
+          transferredBytes: acknowledgement.pendingBytes,
+          failureCode: 'file-channel-unavailable',
+          error: 'File channel closed',
+        }, [memberId]).catch(() => undefined)
+      }
     }
   }
 
-  const persistCurrentRecovery = (): Promise<boolean> => {
+  const recoveryBundleInput = (runtime: SessionRuntime, current: ActiveRoom) => ({
+    roomId: current.roomId,
+    memberId: current.memberId,
+    resumeToken: runtime.resumeToken,
+    linkSecret: runtime.linkSecret,
+    pin: current.pin,
+    expiresAt: current.expiresAt,
+    identity: runtime.identity,
+    keys: runtime.keys,
+    replayCounters: runtime.replayCounters,
+    messages: messagesRef.current,
+    pendingDeliveryAcknowledgements: runtime.pendingDeliveryAcknowledgements.values(),
+  })
+
+  const persistCurrentRecovery = (counterCeiling?: number): Promise<boolean> => {
     const runtime = runtimeRef.current
     const current = roomRef.current
     if (!runtime || !current) return Promise.resolve(false)
-    return saveRecovery(buildRecoveryBundle({
-      roomId: current.roomId,
-      memberId: current.memberId,
-      resumeToken: runtime.resumeToken,
-      linkSecret: runtime.linkSecret,
-      pin: current.pin,
-      expiresAt: current.expiresAt,
-      identity: runtime.identity,
-      keys: runtime.keys,
-      replayCounters: runtime.replayCounters,
-      messages: messagesRef.current,
-      pendingDeliveryAcknowledgements: runtime.pendingDeliveryAcknowledgements.values(),
-    }))
+    const monotonicCounterCeiling = Math.max(
+      runtime.reservedCounterCeiling,
+      counterCeiling ?? runtime.reservedCounterCeiling,
+    )
+    return saveRecoveryState(buildRecoveryStateBundle(
+      recoveryBundleInput(runtime, current),
+      monotonicCounterCeiling,
+    ))
+  }
+
+  const persistRecoveryHistory = (): void => {
+    const runtime = runtimeRef.current
+    const current = roomRef.current
+    if (!runtime || !current) return
+    void saveRecoveryHistory(buildRecoveryBundle(recoveryBundleInput(runtime, current)))
+  }
+
+  const scheduleRecoveryHistory = (): void => {
+    const runtime = runtimeRef.current
+    if (!runtime) return
+    if (runtime.recoveryHistoryTimer !== undefined) window.clearTimeout(runtime.recoveryHistoryTimer)
+    runtime.recoveryHistoryTimer = window.setTimeout(() => {
+      runtime.recoveryHistoryTimer = undefined
+      if (runtimeRef.current === runtime) persistRecoveryHistory()
+    }, RECOVERY_HISTORY_DEBOUNCE_MS)
   }
   persistRecoveryRef.current = persistCurrentRecovery
+  scheduleRecoveryHistoryRef.current = scheduleRecoveryHistory
 
   const completeInitialConnectionIfReady = (runtime: SessionRuntime): void => {
     if (runtime.peerConnectionTimers.size > 0 || runtimeRef.current !== runtime) return
@@ -1058,7 +1162,9 @@ export default function App() {
           type: 'attachment-state',
           attachmentId: acknowledgement.attachmentId,
           state: 'cancelled',
-          transferredBytes: acknowledgement.lastSentBytes,
+          transferredBytes: acknowledgement.pendingBytes,
+          failureCode: 'recipient-too-slow',
+          error: 'Incoming file transfer timed out',
         }, [acknowledgement.senderId]).catch(() => undefined)
       }
     }, INCOMING_TRANSFER_IDLE_TIMEOUT_MS)
@@ -1076,6 +1182,7 @@ export default function App() {
       clearPeerConnectionTimers(runtime)
       if (runtime.turnRefreshTimer !== undefined) window.clearTimeout(runtime.turnRefreshTimer)
       if (runtime.deliveryAcknowledgementFlushTimer !== undefined) window.clearTimeout(runtime.deliveryAcknowledgementFlushTimer)
+      if (runtime.recoveryHistoryTimer !== undefined) window.clearTimeout(runtime.recoveryHistoryTimer)
       runtime.mesh.destroy()
       cancelTransfers(runtime)
       if (sendLeave) runtime.signal.leave()
@@ -1096,7 +1203,12 @@ export default function App() {
       runtime.replayCounters.clear()
       runtime.peerRateWindows.clear()
       runtime.peerViolationWindows.clear()
-      runtime.peerDataQueues.clear()
+      runtime.peerControlQueues.clear()
+      for (const queue of runtime.incomingFileQueues.values()) {
+        queue.pending.clear()
+        queue.queuedBytes = 0
+      }
+      runtime.incomingFileQueues.clear()
       runtime.pendingDeliveryAcknowledgements.clear()
       runtime.pendingOutgoingDeliveries.clear()
       runtime.attachmentMetadata.clear()
@@ -1105,6 +1217,7 @@ export default function App() {
       runtime.incomingTransfers.clear()
       runtime.incomingAcknowledgements.clear()
       runtime.seenAttachments.clear()
+      runtime.terminalFileGraceBudgets.clear()
       runtime.retainedAttachmentBytes = 0
     }
     runtimeRef.current = undefined
@@ -1247,102 +1360,271 @@ export default function App() {
     }
   }
 
-  const processData = async (sourceMemberId: string, raw: string | ArrayBuffer): Promise<void> => {
+  const flushIncomingAcknowledgement = async (
+    runtime: SessionRuntime,
+    viewId: string,
+    force = false,
+  ): Promise<void> => {
+    const acknowledgement = runtime.incomingAcknowledgements.get(viewId)
+    if (!acknowledgement || acknowledgement.sending || runtimeRef.current !== runtime) return
+    if (acknowledgement.timer !== undefined) {
+      window.clearTimeout(acknowledgement.timer)
+      acknowledgement.timer = undefined
+    }
+    if (!force && acknowledgement.pendingBytes <= acknowledgement.lastSentBytes) return
+    const transferredBytes = acknowledgement.pendingBytes
+    acknowledgement.sending = true
+    try {
+      await sendPayload({
+        type: 'attachment-state',
+        attachmentId: acknowledgement.attachmentId,
+        state: 'transferring',
+        transferredBytes,
+      }, [acknowledgement.senderId])
+      acknowledgement.lastSentAt = performance.now()
+      acknowledgement.lastSentBytes = transferredBytes
+    } catch {
+      // Progress is latest-wins. Consume this snapshot so a closed control
+      // channel cannot create a tight retry loop; later progress or the
+      // terminal state will supersede it.
+      acknowledgement.lastSentAt = performance.now()
+      acknowledgement.lastSentBytes = transferredBytes
+    } finally {
+      acknowledgement.sending = false
+      if (
+        runtimeRef.current === runtime &&
+        runtime.incomingAcknowledgements.get(viewId) === acknowledgement &&
+        acknowledgement.pendingBytes > acknowledgement.lastSentBytes
+      ) scheduleIncomingAcknowledgement(runtime, viewId)
+    }
+  }
+
+  const scheduleIncomingAcknowledgement = (
+    runtime: SessionRuntime,
+    viewId: string,
+    transferredBytes?: number,
+  ): void => {
+    const acknowledgement = runtime.incomingAcknowledgements.get(viewId)
+    if (!acknowledgement || runtimeRef.current !== runtime) return
+    if (transferredBytes !== undefined) acknowledgement.pendingBytes = Math.max(acknowledgement.pendingBytes, transferredBytes)
+    if (acknowledgement.sending) return
+    const elapsed = performance.now() - acknowledgement.lastSentAt
+    if (
+      acknowledgement.pendingBytes - acknowledgement.lastSentBytes >= ATTACHMENT_ACK_BYTES ||
+      elapsed >= ATTACHMENT_ACK_INTERVAL_MS
+    ) {
+      void flushIncomingAcknowledgement(runtime, viewId)
+      return
+    }
+    if (acknowledgement.timer === undefined) {
+      acknowledgement.timer = window.setTimeout(() => {
+        acknowledgement.timer = undefined
+        void flushIncomingAcknowledgement(runtime, viewId)
+      }, Math.max(0, ATTACHMENT_ACK_INTERVAL_MS - elapsed))
+    }
+  }
+
+  const failIncomingFile = (
+    runtime: SessionRuntime,
+    viewId: string,
+    sourceMemberId: string,
+    attachmentId: AttachmentMetadata['attachmentId'],
+    transferredBytes: number,
+    error: string,
+    failureCode?: AttachmentFailureCode,
+  ): void => {
+    if (!runtime.incomingTransfers.has(viewId)) return
+    releaseAttachment(runtime, viewId)
+    updateAttachmentProgress(viewId, { status: 'rejected', progress: 0 }, true)
+    void sendPayload({
+      type: 'attachment-state',
+      attachmentId,
+      state: 'failed',
+      transferredBytes,
+      ...(failureCode ? { failureCode } : {}),
+      error,
+    }, [sourceMemberId]).catch(() => undefined)
+  }
+
+  const drainIncomingFileQueue = async (
+    runtime: SessionRuntime,
+    viewId: string,
+    sourceMemberId: string,
+  ): Promise<void> => {
+    const queue = runtime.incomingFileQueues.get(viewId)
+    if (!queue || queue.draining) return
+    queue.draining = true
+    try {
+      while (runtimeRef.current === runtime && runtime.incomingFileQueues.get(viewId) === queue) {
+        const frame = queue.pending.get(queue.nextIndex)
+        if (!frame) break
+        const metadata = runtime.attachmentMetadata.get(viewId)
+        const decryptor = runtime.decryptors.get(viewId)
+        if (!metadata || !decryptor) break
+        const chunkIndex = queue.nextIndex
+        const frameBytes = frame.byteLength
+        queue.pending.delete(chunkIndex)
+        queue.nextIndex += 1
+        let blob: Blob | null
+        try {
+          blob = await decryptor.pushFrame(frame)
+        } catch {
+          queue.queuedBytes = Math.max(0, queue.queuedBytes - frameBytes)
+          failIncomingFile(
+            runtime,
+            viewId,
+            sourceMemberId,
+            metadata.attachmentId,
+            Math.min(metadata.size, chunkIndex * metadata.chunkSize),
+            'File validation failed',
+          )
+          return
+        }
+        queue.queuedBytes = Math.max(0, queue.queuedBytes - frameBytes)
+        if (runtimeRef.current !== runtime || runtime.incomingFileQueues.get(viewId) !== queue) return
+        const transferredBytes = Math.min(metadata.size, (chunkIndex + 1) * metadata.chunkSize)
+        armIncomingTransferTimer(runtime, viewId)
+        updateAttachmentProgress(viewId, {
+          status: 'receiving',
+          progress: transferredBytes / metadata.size,
+        }, blob !== null)
+        if (!blob) {
+          scheduleIncomingAcknowledgement(runtime, viewId, transferredBytes)
+          continue
+        }
+        if (queue.pending.size !== 0 || queue.nextIndex !== metadata.chunkCount || blob.size !== metadata.size) {
+          failIncomingFile(runtime, viewId, sourceMemberId, metadata.attachmentId, transferredBytes, 'Received file metadata is inconsistent')
+          return
+        }
+        const bytes = new Uint8Array(await blob.slice(0, Math.min(blob.size, 8_192)).arrayBuffer())
+        let media: Awaited<ReturnType<typeof validateMedia>>
+        let safeBlob: Blob
+        try {
+          media = await validateMedia(bytes, metadata.mimeType)
+          safeBlob = blob.slice(0, blob.size, media.previewable ? media.mime : 'application/octet-stream')
+        } catch {
+          failIncomingFile(runtime, viewId, sourceMemberId, metadata.attachmentId, transferredBytes, 'Received file type is invalid')
+          return
+        } finally {
+          bytes.fill(0)
+        }
+        const objectUrl = URL.createObjectURL(safeBlob)
+        updateAttachmentProgress(viewId, {
+          status: 'ready',
+          progress: 1,
+          mime: media.mime,
+          previewable: media.previewable,
+          objectUrl,
+        }, true)
+        decryptor.destroy()
+        runtime.decryptors.delete(viewId)
+        runtime.attachmentMetadata.delete(viewId)
+        runtime.incomingTransfers.delete(viewId)
+        runtime.incomingFileQueues.delete(viewId)
+        runtime.terminalFileGraceBudgets.set(viewId, createTerminalFileGraceBudget())
+        const acknowledgement = runtime.incomingAcknowledgements.get(viewId)
+        if (acknowledgement?.timer !== undefined) window.clearTimeout(acknowledgement.timer)
+        runtime.incomingAcknowledgements.delete(viewId)
+        const transferTimer = runtime.incomingTransferTimers.get(viewId)
+        if (transferTimer !== undefined) window.clearTimeout(transferTimer)
+        runtime.incomingTransferTimers.delete(viewId)
+        await sendPayload({
+          type: 'attachment-state',
+          attachmentId: metadata.attachmentId,
+          state: 'complete',
+          transferredBytes: metadata.size,
+        }, [sourceMemberId]).catch(() => undefined)
+        return
+      }
+    } finally {
+      queue.draining = false
+      if (
+        runtimeRef.current === runtime &&
+        runtime.incomingFileQueues.get(viewId) === queue &&
+        queue.pending.has(queue.nextIndex)
+      ) void drainIncomingFileQueue(runtime, viewId, sourceMemberId)
+    }
+  }
+
+  const processFileData = (sourceMemberId: string, raw: ArrayBuffer): void => {
     const runtime = runtimeRef.current
     const currentRoom = roomRef.current
     if (!runtime || !currentRoom) return
     const sender = currentRoom.members.find((member) => member.id === sourceMemberId)
     if (!sender) return
-    const byteLength = typeof raw === 'string'
-      ? boundedUtf8ByteLength(raw, MAX_PEER_BYTES_PER_SECOND)
-      : raw.byteLength
-    if (!acceptPeerFrame(runtime, sourceMemberId, byteLength)) {
+    let frame: ReturnType<typeof inspectFileChunk>
+    try {
+      frame = inspectFileChunk(raw)
+    } catch {
       registerPeerFrameViolation(runtime, sourceMemberId)
       return
     }
-    if (byteLength > MAX_DATA_FRAME_BYTES) {
-      registerPeerFrameViolation(runtime, sourceMemberId)
-      return
-    }
-    if (raw instanceof ArrayBuffer) {
-      let frame: BinaryFileChunk
-      try { frame = decodeFileChunk(raw) } catch {
+    const viewId = attachmentViewId(sourceMemberId, frame.attachmentId)
+    const metadata = runtime.attachmentMetadata.get(viewId)
+    const queue = runtime.incomingFileQueues.get(viewId)
+    if (!metadata || !queue || !runtime.decryptors.has(viewId)) {
+      // Frames already queued by SCTP can arrive after a valid transfer was
+      // cancelled on the independent control channel. Permit only a bounded
+      // tail; once it expires, treat further traffic as unknown-file abuse.
+      const grace = runtime.terminalFileGraceBudgets.get(viewId)
+      if (grace && consumeTerminalFileGraceBudget(grace, raw.byteLength)) {
+        if (grace.remainingBytes === 0) runtime.terminalFileGraceBudgets.delete(viewId)
+        return
+      }
+      if (grace) runtime.terminalFileGraceBudgets.delete(viewId)
+      if (!acceptPeerFrame(runtime, sourceMemberId, raw.byteLength)) {
         registerPeerFrameViolation(runtime, sourceMemberId)
         return
       }
-      const viewId = attachmentViewId(sourceMemberId, frame.attachmentId)
-      const decryptor = runtime.decryptors.get(viewId)
-      const metadata = runtime.attachmentMetadata.get(viewId)
-      const acknowledgement = runtime.incomingAcknowledgements.get(viewId)
-      if (!decryptor || !metadata || !acknowledgement) return
-      const transferredBytes = Math.min(metadata.size, (frame.chunkIndex + 1) * metadata.chunkSize)
-      try {
-        const blob = await decryptor.push({
-          fileId: frame.attachmentId,
-          index: frame.chunkIndex,
-          ciphertext: frame.ciphertext,
-          final: frame.final,
-          ...(frame.digest ? { digest: frame.digest } : {}),
-        })
-        armIncomingTransferTimer(runtime, viewId)
-        updateAttachmentProgress(viewId, {
-          status: 'receiving',
-          progress: transferredBytes / metadata.size,
-        }, frame.final)
-        const now = performance.now()
-        if (!frame.final && (
-          transferredBytes - acknowledgement.lastSentBytes >= ATTACHMENT_ACK_BYTES ||
-          now - acknowledgement.lastSentAt >= ATTACHMENT_ACK_INTERVAL_MS
-        )) {
-          acknowledgement.lastSentAt = now
-          acknowledgement.lastSentBytes = transferredBytes
-          await sendPayload({
-            type: 'attachment-state',
-            attachmentId: frame.attachmentId,
-            state: 'transferring',
-            transferredBytes,
-          }, [sourceMemberId])
-        }
-        if (blob) {
-          if (blob.size !== metadata.size) throw new Error('Received file length does not match the offer')
-          const bytes = new Uint8Array(await blob.slice(0, Math.min(blob.size, 8_192)).arrayBuffer())
-          let media: Awaited<ReturnType<typeof validateMedia>>
-          let safeBlob: Blob
-          try {
-            media = await validateMedia(bytes, metadata.mimeType)
-            safeBlob = blob.slice(0, blob.size, media.previewable ? media.mime : 'application/octet-stream')
-          } finally {
-            bytes.fill(0)
-          }
-          const objectUrl = URL.createObjectURL(safeBlob)
-          updateAttachmentProgress(viewId, { status: 'ready', progress: 1, mime: media.mime, previewable: media.previewable, objectUrl }, true)
-          runtime.decryptors.delete(viewId)
-          runtime.attachmentMetadata.delete(viewId)
-          runtime.incomingTransfers.delete(viewId)
-          runtime.incomingAcknowledgements.delete(viewId)
-          const transferTimer = runtime.incomingTransferTimers.get(viewId)
-          if (transferTimer !== undefined) window.clearTimeout(transferTimer)
-          runtime.incomingTransferTimers.delete(viewId)
-          await sendPayload({
-            type: 'attachment-state',
-            attachmentId: frame.attachmentId,
-            state: 'complete',
-            transferredBytes: metadata.size,
-          }, [sourceMemberId])
-        }
-      } catch {
-        releaseAttachment(runtime, viewId)
-        updateAttachmentProgress(viewId, { status: 'rejected', progress: 0 }, true)
-        try {
-          await sendPayload({
-            type: 'attachment-state',
-            attachmentId: frame.attachmentId,
-            state: 'failed',
-            transferredBytes: Math.min(transferredBytes, metadata.size),
-            error: 'File validation failed',
-          }, [sourceMemberId])
-        } catch { /* The peer may already be disconnected. */ }
-      }
+      registerPeerFrameViolation(runtime, sourceMemberId)
+      return
+    }
+    const expectedFinal = frame.chunkIndex === metadata.chunkCount - 1
+    if (
+      frame.chunkIndex >= metadata.chunkCount ||
+      frame.final !== expectedFinal ||
+      frame.chunkIndex < queue.nextIndex ||
+      queue.pending.has(frame.chunkIndex)
+    ) {
+      failIncomingFile(
+        runtime,
+        viewId,
+        sourceMemberId,
+        metadata.attachmentId,
+        Math.min(metadata.size, queue.nextIndex * metadata.chunkSize),
+        'Received duplicate, out-of-range, or inconsistent file chunk',
+      )
+      return
+    }
+    if (queue.queuedBytes + raw.byteLength > MAX_INCOMING_FILE_QUEUE_BYTES) {
+      failIncomingFile(
+        runtime,
+        viewId,
+        sourceMemberId,
+        metadata.attachmentId,
+        Math.min(metadata.size, queue.nextIndex * metadata.chunkSize),
+        'Receiver file queue exceeded 32 MiB',
+        'receiver-overloaded',
+      )
+      return
+    }
+    queue.pending.set(frame.chunkIndex, raw)
+    queue.queuedBytes += raw.byteLength
+    void drainIncomingFileQueue(runtime, viewId, sourceMemberId)
+  }
+
+  const processControlData = async (sourceMemberId: string, raw: string): Promise<void> => {
+    const runtime = runtimeRef.current
+    const currentRoom = roomRef.current
+    if (!runtime || !currentRoom) return
+    const sender = currentRoom.members.find((member) => member.id === sourceMemberId)
+    if (!sender) return
+    const byteLength = boundedUtf8ByteLength(raw, MAX_PEER_BYTES_PER_SECOND)
+    if (
+      byteLength > MAX_CONTROL_FRAME_BYTES ||
+      !acceptPeerFrame(runtime, sourceMemberId, byteLength)
+    ) {
+      registerPeerFrameViolation(runtime, sourceMemberId)
       return
     }
     let value: unknown
@@ -1392,7 +1674,6 @@ export default function App() {
       }
       return
     }
-
   }
 
   const processPayload = async (payload: ChatPayload, sender: Member, sentAt: number, messageId: string): Promise<boolean> => {
@@ -1452,11 +1733,19 @@ export default function App() {
           }
           runtime.decryptors.set(viewId, decryptor)
           runtime.attachmentMetadata.set(viewId, metadata)
+          runtime.incomingFileQueues.set(viewId, {
+            nextIndex: 0,
+            pending: new Map(),
+            queuedBytes: 0,
+            draining: false,
+          })
           runtime.incomingAcknowledgements.set(viewId, {
             senderId: sender.id,
             attachmentId: metadata.attachmentId,
             lastSentAt: performance.now(),
             lastSentBytes: 0,
+            pendingBytes: 0,
+            sending: false,
           })
           armIncomingTransferTimer(runtime, viewId)
         } catch {
@@ -1489,7 +1778,10 @@ export default function App() {
           attachmentId: metadata.attachmentId,
           state: accepted ? 'accepted' : 'declined',
           transferredBytes: 0,
-          ...(!accepted ? { error: 'Receiver rejected the file offer' } : {}),
+          ...(!accepted ? {
+            failureCode: 'receiver-overloaded' as const,
+            error: 'Receiver rejected the file offer',
+          } : {}),
         }, [sender.id])
       } catch {
         if (accepted) {
@@ -1498,6 +1790,14 @@ export default function App() {
         }
       }
       return true
+    }
+    if (payload.type === 'attachment-cancel') {
+      const viewId = attachmentViewId(sender.id, payload.attachmentId)
+      if (runtime.incomingTransfers.has(viewId)) {
+        releaseAttachment(runtime, viewId)
+        updateAttachmentProgress(viewId, { status: 'cancelled', progress: 0 }, true)
+      }
+      return false
     }
     if (payload.type === 'message-delivered') {
       recordDeliveryAcknowledgements(sender.id, payload.messageIds)
@@ -1526,9 +1826,6 @@ export default function App() {
       recipient.sampleAt = now
       recipient.sampleBytes = payload.transferredBytes
     }
-    recipient.status = payload.state === 'accepted' || payload.state === 'transferring' || payload.state === 'complete' || payload.state === 'declined' || payload.state === 'failed' || payload.state === 'cancelled'
-      ? payload.state
-      : recipient.status
     recipient.transferredBytes = payload.transferredBytes
     recipient.lastAcknowledgedAt = Date.now()
     void runtime.mesh.transportStats(sender.id).then((stats) => {
@@ -1537,10 +1834,15 @@ export default function App() {
       recipient.availableOutgoingBitrate = stats.availableOutgoingBitrate
       syncOutboundTransfer(transfer)
     }).catch(() => undefined)
-    if (recipientTerminal(recipient.status)) {
-      if (recipient.timeout !== undefined) window.clearTimeout(recipient.timeout)
-      recipient.timeout = undefined
+    if (
+      payload.state === 'complete' ||
+      payload.state === 'declined' ||
+      payload.state === 'failed' ||
+      payload.state === 'cancelled'
+    ) {
+      markOutboundRecipientTerminal(recipient, payload.state, payload.failureCode)
     } else {
+      recipient.status = payload.state
       armOutboundRecipientTimeout(runtime, transfer, recipient)
     }
     syncOutboundTransfer(transfer, recipientTerminal(recipient.status))
@@ -1573,16 +1875,19 @@ export default function App() {
         if (payload.description) signal.sendRtcDescription(targetMemberId as never, payload.description)
         if (payload.candidate) signal.sendRtcCandidate(targetMemberId as never, payload.candidate)
       },
-      onData: (sourceMemberId, data) => {
-        const previous = runtime.peerDataQueues.get(sourceMemberId) ?? Promise.resolve()
+      onControlData: (sourceMemberId, data) => {
+        const previous = runtime.peerControlQueues.get(sourceMemberId) ?? Promise.resolve()
         const next = previous
           .catch(() => undefined)
-          .then(() => processData(sourceMemberId, data))
+          .then(() => processControlData(sourceMemberId, data))
           .catch(() => undefined)
-        runtime.peerDataQueues.set(sourceMemberId, next)
+        runtime.peerControlQueues.set(sourceMemberId, next)
         void next.then(() => {
-          if (runtime.peerDataQueues.get(sourceMemberId) === next) runtime.peerDataQueues.delete(sourceMemberId)
+          if (runtime.peerControlQueues.get(sourceMemberId) === next) runtime.peerControlQueues.delete(sourceMemberId)
         })
+      },
+      onFileData: (sourceMemberId, data) => {
+        processFileData(sourceMemberId, data)
       },
       onConnectionChange: (memberId, state) => {
         if (state === 'failed') {
@@ -1599,6 +1904,9 @@ export default function App() {
           failTransfersForMember(runtime, memberId)
           armPeerConnectionTimer(runtime, memberId)
         }
+      },
+      onFileChannelChange: (memberId, state) => {
+        if (state === 'closed') failTransfersForMember(runtime, memberId)
       },
       onDiagnostic: (memberId, event) => {
         if (trackJoin) updateJoinPeer(memberId, event)
@@ -1624,6 +1932,8 @@ export default function App() {
         }
       })
     })
+    const reservedCounterCeiling = identity.counter + OUTGOING_COUNTER_RESERVATION
+    if (!Number.isSafeInteger(reservedCounterCeiling)) throw new Error('消息计数器已耗尽')
     Object.assign(runtime, {
       signal,
       identity,
@@ -1633,7 +1943,8 @@ export default function App() {
       replayCounters: new Map(initialReplayCounters),
       peerRateWindows: new Map(),
       peerViolationWindows: new Map(),
-      peerDataQueues: new Map(),
+      peerControlQueues: new Map(),
+      incomingFileQueues: new Map(),
       peerConnectionTimers: new Map(),
       peerConnectionTimeoutMs,
       pendingDeliveryAcknowledgements: new Map(initialPendingDeliveryAcknowledgements.map((acknowledgement) => [
@@ -1655,8 +1966,11 @@ export default function App() {
       incomingAcknowledgements: new Map(),
       retainedAttachmentBytes: 0,
       seenAttachments: new Set(),
+      terminalFileGraceBudgets: new Map(),
       outboundTransfers: new Map(),
       transferEpoch: 0,
+      reservedCounterCeiling,
+      outgoingEncryptionQueue: Promise.resolve(),
       unsubscribe,
       resumeToken: confirmation.resumeToken,
       turnCredentialsExpiresAt: turnCredentials.expiresAt,
@@ -1674,6 +1988,7 @@ export default function App() {
     }
     if (trackJoin) await runJoinStep('checkpoint', persistCheckpoint)
     else await persistCheckpoint()
+    scheduleRecoveryHistory()
     scheduleTurnRefresh(runtime, turnCredentials)
     if (trackJoin) {
       initializeJoinPeers(initialRoom)
@@ -1751,6 +2066,7 @@ export default function App() {
       messagesRef.current = bundle.messages
       setMessages(bundle.messages)
       if (!await persistCurrentRecovery()) throw new Error('无法更新安全刷新检查点')
+      scheduleRecoveryHistory()
       window.history.replaceState(window.history.state, '', `/room/${roomId}`)
       setError(undefined)
       setJoinAttempt((current) => current ? { ...current, finishedAt: Date.now() } : current)
@@ -1820,7 +2136,7 @@ export default function App() {
       runtime.mesh.removePeer(frame.payload.memberId)
       runtime.peerRateWindows.delete(frame.payload.memberId)
       runtime.peerViolationWindows.delete(frame.payload.memberId)
-      runtime.peerDataQueues.delete(frame.payload.memberId)
+      runtime.peerControlQueues.delete(frame.payload.memberId)
       for (const key of [...runtime.replayCounters.keys()]) {
         if (key.startsWith(`${frame.payload.memberId}:`)) runtime.replayCounters.delete(key)
       }
@@ -1839,11 +2155,7 @@ export default function App() {
       for (const transfer of runtime.outboundTransfers.values()) {
         const recipient = transfer.recipients.get(frame.payload.memberId)
         if (!recipient || recipientTerminal(recipient.status)) continue
-        recipient.status = 'failed'
-        if (recipient.timeout !== undefined) window.clearTimeout(recipient.timeout)
-        recipient.timeout = undefined
-        syncOutboundTransfer(transfer, true)
-        settleOutboundTransfer(transfer)
+        cancelOutboundRecipient(runtime, transfer, recipient, 'failed', 'file-channel-unavailable')
       }
       updateMessages((currentMessages) => currentMessages.map((message) => ({
         ...message,
@@ -2021,15 +2333,49 @@ export default function App() {
     }
   }
 
+  const encryptReservedPayload = async (
+    runtime: SessionRuntime,
+    current: ActiveRoom,
+    payload: ChatPayload,
+  ): Promise<Awaited<ReturnType<typeof encryptChatPayload>>> => {
+    const previous = runtime.outgoingEncryptionQueue
+    let unlock!: () => void
+    runtime.outgoingEncryptionQueue = new Promise<void>((resolve) => { unlock = resolve })
+    await previous.catch(() => undefined)
+    try {
+      if (runtimeRef.current !== runtime) throw new Error('安全连接已结束')
+      if (runtime.identity.counter >= runtime.reservedCounterCeiling) {
+        const nextCeiling = runtime.reservedCounterCeiling + OUTGOING_COUNTER_RESERVATION
+        if (!Number.isSafeInteger(nextCeiling) || nextCeiling > Number.MAX_SAFE_INTEGER) {
+          throw new Error('消息计数器已耗尽')
+        }
+        // Raise the in-memory ceiling before enqueueing the checkpoint so any
+        // concurrent replay/room checkpoint can only persist this value or a
+        // higher one after it.
+        runtime.reservedCounterCeiling = nextCeiling
+        if (!await persistCurrentRecovery(nextCeiling)) {
+          abortForRecoveryFailure()
+          throw new Error('无法安全预留发送计数器')
+        }
+      }
+      return await encryptChatPayload(payload, current.memberId, runtime.identity, runtime.keys.messageKey)
+    } finally {
+      unlock()
+    }
+  }
+
   const sendPayload = async (payload: ChatPayload, targetMemberIds?: readonly string[]): Promise<SendPayloadResult> => {
     const runtime = runtimeRef.current
     const current = roomRef.current
     if (!runtime || !current) throw new Error('安全连接尚未就绪')
     const validated = ChatPayloadSchema.parse(payload)
-    const frame = await encryptChatPayload(validated, current.memberId, runtime.identity, runtime.keys.messageKey)
+    const frame = await encryptReservedPayload(runtime, current, validated)
+    const targetedMembers = targetMemberIds ? new Set(targetMemberIds) : undefined
     const deliveryRecipients = validated.type === 'rich-text' || validated.type === 'attachment-offer'
       ? current.members
-        .filter((member) => member.id !== current.memberId)
+        .filter((member) =>
+          member.id !== current.memberId &&
+          (targetedMembers === undefined || targetedMembers.has(member.id)))
         .map((member) => ({
           memberId: member.id,
           nickname: member.nickname,
@@ -2046,18 +2392,13 @@ export default function App() {
         deliveredAtByMember: new Map(),
       })
     }
-    if (!await persistCurrentRecovery()) {
-      runtime.pendingOutgoingDeliveries.delete(frame.messageId)
-      abortForRecoveryFailure()
-      throw new Error('无法安全保存发送状态')
-    }
     const serialized = JSON.stringify(frame)
     try {
       if (targetMemberIds) {
-        const sent = await runtime.mesh.sendMany(targetMemberIds, serialized)
+        const sent = await runtime.mesh.sendControlMany(targetMemberIds, serialized)
         if (sent !== targetMemberIds.length) throw new Error('部分成员的安全连接不可用')
       } else {
-        await runtime.mesh.broadcast(serialized)
+        await runtime.mesh.broadcastControl(serialized)
       }
     } catch (caught) {
       runtime.pendingOutgoingDeliveries.delete(frame.messageId)
@@ -2102,15 +2443,195 @@ export default function App() {
     }
   }
 
+  const cancelOutboundRecipient = (
+    runtime: SessionRuntime,
+    transfer: OutboundTransfer,
+    recipient: OutboundRecipient,
+    status: 'failed' | 'cancelled',
+    reason: AttachmentFailureCode,
+  ): void => {
+    if (recipientTerminal(recipient.status)) return
+    markOutboundRecipientTerminal(recipient, status, reason)
+    syncOutboundTransfer(transfer, true)
+    settleOutboundTransfer(transfer)
+    void sendPayload({
+      type: 'attachment-cancel',
+      attachmentId: transfer.attachmentId,
+      reason,
+    }, [recipient.memberId]).catch(() => undefined)
+  }
+
+  const drainOutboundRecipientQueue = (
+    runtime: SessionRuntime,
+    transfer: OutboundTransfer,
+    recipient: OutboundRecipient,
+  ): void => {
+    if (recipient.drainPromise || recipientTerminal(recipient.status)) return
+    const drainPromise = (async () => {
+      while (
+        runtimeRef.current === runtime &&
+        runtime.outboundTransfers.get(transfer.attachmentId) === transfer &&
+        recipient.status === 'transferring'
+      ) {
+        const frame = recipient.queue[0]
+        if (!frame) return
+        let sent = false
+        try {
+          sent = await runtime.mesh.sendFile(recipient.memberId, frame)
+        } catch {
+          sent = false
+        }
+        if (!sent) {
+          cancelOutboundRecipient(runtime, transfer, recipient, 'failed', 'file-channel-unavailable')
+          return
+        }
+        if (recipient.queue[0] === frame) {
+          recipient.queue.shift()
+          recipient.queuedBytes = Math.max(0, recipient.queuedBytes - frame.byteLength)
+          wakeRecipientCapacity(recipient)
+        }
+      }
+    })()
+    const trackedPromise = drainPromise.finally(() => {
+      if (recipient.drainPromise === trackedPromise) recipient.drainPromise = undefined
+      wakeRecipientCapacity(recipient)
+      if (
+        runtimeRef.current === runtime &&
+        runtime.outboundTransfers.get(transfer.attachmentId) === transfer &&
+        recipient.status === 'transferring' &&
+        recipient.queue.length > 0
+      ) drainOutboundRecipientQueue(runtime, transfer, recipient)
+    })
+    recipient.drainPromise = trackedPromise
+  }
+
+  const waitForOutboundRecipientDrain = async (
+    runtime: SessionRuntime,
+    transfer: OutboundTransfer,
+    recipient: OutboundRecipient,
+  ): Promise<void> => {
+    while (
+      runtimeRef.current === runtime &&
+      runtime.outboundTransfers.get(transfer.attachmentId) === transfer &&
+      recipient.status === 'transferring' &&
+      (recipient.queue.length > 0 || recipient.drainPromise)
+    ) {
+      if (!recipient.drainPromise && recipient.queue.length > 0) {
+        drainOutboundRecipientQueue(runtime, transfer, recipient)
+      }
+      const drainPromise = recipient.drainPromise
+      if (!drainPromise) continue
+      let wake!: () => void
+      const capacityChanged = new Promise<void>((resolve) => {
+        wake = resolve
+        recipient.capacityWaiters.add(wake)
+      })
+      await Promise.race([
+        drainPromise,
+        capacityChanged,
+      ])
+      recipient.capacityWaiters.delete(wake)
+    }
+  }
+
+  const waitForOutboundCapacity = async (
+    recipients: readonly OutboundRecipient[],
+    signal: AbortSignal,
+  ): Promise<void> => {
+    if (signal.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
+    await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const cleanup = (): void => {
+        for (const recipient of recipients) recipient.capacityWaiters.delete(onCapacity)
+        signal.removeEventListener('abort', onAbort)
+      }
+      const onCapacity = (): void => {
+        if (settled) return
+        settled = true
+        cleanup()
+        resolve()
+      }
+      const onAbort = (): void => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(new DOMException('File transfer cancelled', 'AbortError'))
+      }
+      for (const recipient of recipients) recipient.capacityWaiters.add(onCapacity)
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+
+  const enqueueOutboundFrame = async (
+    runtime: SessionRuntime,
+    transfer: OutboundTransfer,
+    frame: ArrayBuffer,
+  ): Promise<void> => {
+    while (true) {
+      if (transfer.controller.signal.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
+      const recipients = [...transfer.recipients.values()]
+        .filter((recipient) => recipient.status === 'transferring')
+      if (recipients.length === 0) throw new Error('所有接收方的文件通道均已断开')
+
+      const overLimit = recipients.filter((recipient) =>
+        recipient.queuedBytes + frame.byteLength > MAX_OUTBOUND_RECIPIENT_LAG_BYTES)
+      if (overLimit.length > 0 && overLimit.length < recipients.length) {
+        for (const recipient of overLimit) {
+          cancelOutboundRecipient(runtime, transfer, recipient, 'failed', 'recipient-too-slow')
+        }
+        continue
+      }
+      if (recipients.every((recipient) =>
+        recipient.queuedBytes + frame.byteLength > OUTBOUND_RECIPIENT_BASE_QUEUE_BYTES)) {
+        await waitForOutboundCapacity(recipients, transfer.controller.signal)
+        continue
+      }
+      for (const recipient of recipients) {
+        recipient.queue.push(frame)
+        recipient.queuedBytes += frame.byteLength
+        drainOutboundRecipientQueue(runtime, transfer, recipient)
+      }
+      return
+    }
+  }
+
   const sendFiles = async (files: File[], replyTo?: ReplyReference): Promise<boolean> => {
     const runtime = runtimeRef.current
     const current = roomRef.current
     const self = current?.members.find((member) => member.id === current.memberId)
     if (!runtime || !current || !self) return false
-    const accepted = files.slice(0, 4)
+    const connectedMemberIds = new Set(runtime.mesh.connectedMemberIds())
+    const targetMembers = current.members.filter((member) => member.id !== current.memberId)
+    if (targetMembers.length === 0) {
+      setError('当前没有可接收文件的成员')
+      return false
+    }
+    const incompatible = targetMembers.flatMap((member) => {
+      if (!connectedMemberIds.has(member.id)) {
+        return [`${member.nickname}（安全控制通道尚未打开）`]
+      }
+      const capability = runtime.mesh.fileCapability(member.id)
+      if (capability.supported) return []
+      const reason = capability.reason === 'max-message-size-too-small'
+        ? `消息上限仅 ${Math.floor((capability.maxMessageSize ?? 0) / 1024)} KiB`
+        : capability.reason === 'sctp-unavailable' || capability.reason === 'max-message-size-unavailable'
+          ? '浏览器未提供必要的 SCTP 能力'
+          : capability.reason === 'buffered-amount-low-unsupported'
+            ? '浏览器缺少 DataChannel 缓冲事件'
+            : capability.reason === 'file-channel-misconfigured'
+              ? '文件通道配置不兼容'
+              : '高速文件通道尚未打开'
+      return [`${member.nickname}（${reason}）`]
+    })
+    if (incompatible.length > 0) {
+      setError(`无法发送文件：以下成员不支持高速文件传输：${incompatible.join('、')}。请让这些成员升级或更换浏览器后重试；文本聊天仍可继续。`)
+      return false
+    }
+
+    const acceptedFiles = files.slice(0, 4)
     const transferEpoch = runtime.transferEpoch
     let sentAny = false
-    for (const file of accepted) {
+    for (const file of acceptedFiles) {
       if (runtimeRef.current !== runtime || runtime.transferEpoch !== transferEpoch) break
       const maxBytes = preferences.maxFileSizeMb * 1024 * 1024
       if (file.size < 1 || file.size > maxBytes) {
@@ -2118,14 +2639,9 @@ export default function App() {
         continue
       }
       const fileName = normalizeFileName(file.name)
-      const attachmentId = randomId(16)
+      const attachmentId = AttachmentIdSchema.parse(randomId(16))
       const viewId = attachmentViewId(self.id, attachmentId)
       const controller = new AbortController()
-      const targetMembers = current.members.filter((member) => member.id !== current.memberId && runtime.mesh.connectedMemberIds().includes(member.id))
-      if (targetMembers.length === 0) {
-        setError('当前没有可接收文件的成员')
-        continue
-      }
       let acceptanceResolve!: () => void
       let completionResolve!: () => void
       const transfer: OutboundTransfer = {
@@ -2142,6 +2658,10 @@ export default function App() {
           sampleBytes: 0,
           sampleAt: performance.now(),
           bytesPerSecond: 0,
+          startedAt: 0,
+          queue: [],
+          queuedBytes: 0,
+          capacityWaiters: new Set(),
         }])),
         acceptancePromise: new Promise<void>((resolve) => { acceptanceResolve = resolve }),
         acceptanceResolve: () => acceptanceResolve(),
@@ -2153,7 +2673,7 @@ export default function App() {
       let objectUrl: string | undefined
       let messageCreated = false
       try {
-        const headerBytes = new Uint8Array(await file.slice(0, Math.min(file.size, 8192)).arrayBuffer())
+        const headerBytes = new Uint8Array(await file.slice(0, Math.min(file.size, 8_192)).arrayBuffer())
         let validatedMedia: Awaited<ReturnType<typeof validateMedia>>
         try {
           if (controller.signal.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
@@ -2180,6 +2700,8 @@ export default function App() {
             if (controller.signal.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
             const payload = ChatPayloadSchema.parse({ type: 'attachment-offer', attachment: metadata, replyTo })
             if (payload.type !== 'attachment-offer') throw new Error('Invalid attachment payload')
+            const offerStartedAt = Date.now()
+            for (const recipient of transfer.recipients.values()) recipient.startedAt = offerStartedAt
             const recipientIds = [...transfer.recipients.keys()]
             const result = await sendPayload(payload, recipientIds)
             const deliveryRecipients = finalizeOutgoingDelivery(runtime, result)
@@ -2210,7 +2732,9 @@ export default function App() {
             }], false)
             transfer.acceptanceTimer = window.setTimeout(() => {
               for (const recipient of transfer.recipients.values()) {
-                if (recipient.status === 'offered') recipient.status = 'failed'
+                if (recipient.status === 'offered') {
+                  cancelOutboundRecipient(runtime, transfer, recipient, 'failed', 'recipient-too-slow')
+                }
               }
               transfer.acceptanceTimer = undefined
               syncOutboundTransfer(transfer, true)
@@ -2219,10 +2743,14 @@ export default function App() {
             await transfer.acceptancePromise
             if (transfer.acceptanceTimer !== undefined) window.clearTimeout(transfer.acceptanceTimer)
             transfer.acceptanceTimer = undefined
-            const accepted = [...transfer.recipients.values()].filter((recipient) => recipient.status === 'accepted')
-            if (accepted.length === 0) throw new Error('没有成员接受该文件')
-            for (const recipient of accepted) {
+            const acceptedRecipients = [...transfer.recipients.values()]
+              .filter((recipient) => recipient.status === 'accepted')
+            if (acceptedRecipients.length === 0) throw new Error('没有成员接受该文件')
+            for (const recipient of acceptedRecipients) {
               recipient.status = 'transferring'
+              recipient.sampleAt = performance.now()
+              recipient.sampleBytes = 0
+              recipient.lastAcknowledgedAt = Date.now()
               armOutboundRecipientTimeout(runtime, transfer, recipient)
             }
             syncOutboundTransfer(transfer, true)
@@ -2236,34 +2764,32 @@ export default function App() {
               ciphertext: chunk.ciphertext,
               ...(chunk.digest ? { digest: chunk.digest } : {}),
             })
-            const recipients = [...transfer.recipients.values()].filter((recipient) => recipient.status === 'transferring')
-            if (recipients.length === 0) throw new Error('所有接收方均已断开')
-            await Promise.all(recipients.map(async (recipient) => {
-              if (!await runtime.mesh.send(recipient.memberId, wire)) {
-                recipient.status = 'failed'
-                if (recipient.timeout !== undefined) window.clearTimeout(recipient.timeout)
-                recipient.timeout = undefined
-              }
-            }))
-            settleOutboundTransfer(transfer)
-            syncOutboundTransfer(transfer)
-            if (controller.signal.aborted) throw new DOMException('File transfer cancelled', 'AbortError')
+            await enqueueOutboundFrame(runtime, transfer, wire)
           },
           controller.signal,
         )
+        await Promise.all([...transfer.recipients.values()]
+          .filter((recipient) => recipient.status === 'transferring')
+          .map((recipient) => waitForOutboundRecipientDrain(runtime, transfer, recipient)))
         const activeRecipientIds = [...transfer.recipients.values()]
           .filter((recipient) => recipient.status === 'transferring')
           .map((recipient) => recipient.memberId)
-        await runtime.mesh.flush(activeRecipientIds)
+        await runtime.mesh.flushFile(activeRecipientIds)
         settleOutboundTransfer(transfer)
         await transfer.completionPromise
         syncOutboundTransfer(transfer, true)
       } catch (caught) {
         const cancelled = isAbortError(caught)
         for (const recipient of transfer.recipients.values()) {
-          if (!recipientTerminal(recipient.status)) recipient.status = cancelled ? 'cancelled' : 'failed'
-          if (recipient.timeout !== undefined) window.clearTimeout(recipient.timeout)
-          recipient.timeout = undefined
+          if (!recipientTerminal(recipient.status)) {
+            cancelOutboundRecipient(
+              runtime,
+              transfer,
+              recipient,
+              cancelled ? 'cancelled' : 'failed',
+              'sender-cancelled',
+            )
+          }
         }
         if (messageCreated) syncOutboundTransfer(transfer, true)
         else if (objectUrl) URL.revokeObjectURL(objectUrl)
@@ -2273,6 +2799,7 @@ export default function App() {
         if (transfer.acceptanceTimer !== undefined) window.clearTimeout(transfer.acceptanceTimer)
         for (const recipient of transfer.recipients.values()) {
           if (recipient.timeout !== undefined) window.clearTimeout(recipient.timeout)
+          wakeRecipientCapacity(recipient)
         }
         if (runtime.outboundTransfers.get(attachmentId) === transfer) {
           runtime.outboundTransfers.delete(attachmentId)
