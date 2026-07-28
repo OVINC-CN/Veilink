@@ -3,8 +3,6 @@ package server
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -348,7 +346,7 @@ func (c *connection) handle(parent context.Context, envelope protocol.ClientEnve
 		if !allowed {
 			return &store.StoreError{Code: store.ErrRateLimited}
 		}
-		if !c.server.validRoomCreationPassword(payload.CreationPassword) {
+		if !c.server.cfg.ValidRoomCreationPassword(payload.CreationPassword) {
 			return actionError("invalid_creation_password")
 		}
 		key, err := base64.RawURLEncoding.DecodeString(payload.AdmissionVerifier)
@@ -772,14 +770,6 @@ func (s *Server) trustedIP(ip net.IP) bool {
 		}
 	}
 	return false
-}
-
-func (s *Server) validRoomCreationPassword(value string) bool {
-	if !s.cfg.RoomCreationPasswordRequired {
-		return true
-	}
-	digest := sha256.Sum256([]byte(value))
-	return subtle.ConstantTimeCompare(digest[:], s.cfg.RoomCreationPasswordHash[:]) == 1
 }
 
 func (s *Server) static(response http.ResponseWriter, request *http.Request) {

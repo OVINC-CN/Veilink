@@ -1,7 +1,10 @@
 package config
 
 import (
+	"crypto/pbkdf2"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net"
@@ -14,7 +17,12 @@ import (
 	"unicode/utf8"
 )
 
-const MaxRoomTTL = 24 * time.Hour
+const (
+	MaxRoomTTL                       = 24 * time.Hour
+	roomCreationPasswordIterations   = 600_000
+	roomCreationPasswordSaltSize     = 16
+	roomCreationPasswordVerifierSize = 32
+)
 
 type Config struct {
 	Host                         string
@@ -28,7 +36,6 @@ type Config struct {
 	CloudflareTURNKeyID          string
 	CloudflareTURNAPIToken       string
 	TURNCredentialTTL            time.Duration
-	RoomCreationPasswordHash     [sha256.Size]byte
 	RoomCreationPasswordRequired bool
 	RoomTTL                      time.Duration
 	MaxRooms                     int
@@ -43,6 +50,8 @@ type Config struct {
 	ChallengeTTL                 time.Duration
 	TrustedProxyNets             []*net.IPNet
 	StaticRoot                   string
+	roomCreationPasswordSalt     [roomCreationPasswordSaltSize]byte
+	roomCreationPasswordVerifier [roomCreationPasswordVerifierSize]byte
 }
 
 func Load() (Config, error) {
@@ -125,13 +134,31 @@ func Load() (Config, error) {
 		return Config{}, errors.New("CLOUDFLARE_TURN_API_TOKEN must contain 32 to 512 non-whitespace characters")
 	}
 	creationPassword := os.Getenv("ROOM_CREATION_PASSWORD")
+	_ = os.Unsetenv("ROOM_CREATION_PASSWORD")
 	if !utf8.ValidString(creationPassword) || len(creationPassword) > 256 {
 		return Config{}, errors.New("ROOM_CREATION_PASSWORD must be valid UTF-8 and at most 256 bytes")
 	}
 	creationPasswordRequired := creationPassword != ""
-	creationPasswordHash := sha256.Sum256([]byte(creationPassword))
+	var creationPasswordSalt [roomCreationPasswordSaltSize]byte
+	var creationPasswordVerifier [roomCreationPasswordVerifierSize]byte
+	if creationPasswordRequired {
+		if _, err := rand.Read(creationPasswordSalt[:]); err != nil {
+			return Config{}, fmt.Errorf("generate ROOM_CREATION_PASSWORD salt: %w", err)
+		}
+		derived, err := pbkdf2.Key(
+			sha256.New,
+			creationPassword,
+			creationPasswordSalt[:],
+			roomCreationPasswordIterations,
+			roomCreationPasswordVerifierSize,
+		)
+		if err != nil {
+			return Config{}, fmt.Errorf("derive ROOM_CREATION_PASSWORD verifier: %w", err)
+		}
+		copy(creationPasswordVerifier[:], derived)
+		clear(derived)
+	}
 	creationPassword = ""
-	_ = os.Unsetenv("ROOM_CREATION_PASSWORD")
 	tlsCert := strings.TrimSpace(os.Getenv("TLS_CERT_FILE"))
 	tlsKey := strings.TrimSpace(os.Getenv("TLS_KEY_FILE"))
 	if (tlsCert == "") != (tlsKey == "") {
@@ -159,7 +186,6 @@ func Load() (Config, error) {
 		CloudflareTURNKeyID:          turnKeyID,
 		CloudflareTURNAPIToken:       turnAPIToken,
 		TURNCredentialTTL:            time.Duration(turnCredentialTTLSeconds) * time.Second,
-		RoomCreationPasswordHash:     creationPasswordHash,
 		RoomCreationPasswordRequired: creationPasswordRequired,
 		RoomTTL:                      time.Duration(roomTTLSeconds) * time.Second,
 		MaxRooms:                     maxRooms,
@@ -174,7 +200,30 @@ func Load() (Config, error) {
 		ChallengeTTL:                 30 * time.Second,
 		TrustedProxyNets:             trusted,
 		StaticRoot:                   staticRoot,
+		roomCreationPasswordSalt:     creationPasswordSalt,
+		roomCreationPasswordVerifier: creationPasswordVerifier,
 	}, nil
+}
+
+func (cfg *Config) ValidRoomCreationPassword(value string) bool {
+	if !cfg.RoomCreationPasswordRequired {
+		return true
+	}
+	if !utf8.ValidString(value) || len(value) > 256 {
+		return false
+	}
+	derived, err := pbkdf2.Key(
+		sha256.New,
+		value,
+		cfg.roomCreationPasswordSalt[:],
+		roomCreationPasswordIterations,
+		roomCreationPasswordVerifierSize,
+	)
+	if err != nil {
+		return false
+	}
+	defer clear(derived)
+	return subtle.ConstantTimeCompare(derived, cfg.roomCreationPasswordVerifier[:]) == 1
 }
 
 func integer(name string, fallback, minimum, maximum int) (int, error) {
